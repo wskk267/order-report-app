@@ -1,0 +1,16 @@
+[Unit]
+Description=Order Report App local API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/mnt/nvme/item/order-report-app
+EnvironmentFile=-/mnt/nvme/item/order-report-app/.env
+ExecStart=/usr/bin/node /mnt/nvme/item/order-report-app/server.js
+Restart=on-failure
+RestartSec=3
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,16 @@
+node_modules/
+runtime/*
+!runtime/.gitkeep
+.env
+.env.*
+!.env.example
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+*.keystore
+*.jks
+*.apk
+*.aab
+.DS_Store
+npm-debug.log*

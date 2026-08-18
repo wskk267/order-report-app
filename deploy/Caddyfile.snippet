@@ -1,0 +1,5 @@
+# Add this site to the existing Caddy configuration after choosing the app subdomain.
+# Use a dedicated subdomain; do not reuse a root site that serves another app.
+order.your-domain.example {
+    reverse_proxy 127.0.0.1:3011
+}

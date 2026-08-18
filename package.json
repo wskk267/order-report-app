@@ -1,0 +1,19 @@
+{
+  "name": "order-report-app",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Offline-first Android order, shipment, inventory and return tracking app.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js",
+    "test": "node --test test/*.test.js",
+    "android:assets": "node scripts/sync-android-assets.js"
+  },
+  "engines": {
+    "node": ">=18.17"
+  },
+  "dependencies": {
+    "sql.js": "^1.14.2"
+  }
+}

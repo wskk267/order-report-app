@@ -1,0 +1,9 @@
+{
+  "name": "报单管家",
+  "short_name": "报单管家",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#f5f3ee",
+  "theme_color": "#f5f3ee",
+  "icons": []
+}

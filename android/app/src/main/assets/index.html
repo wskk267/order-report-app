@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="theme-color" content="#f5f3ee">
+    <link rel="manifest" href="manifest.webmanifest">
+    <link rel="stylesheet" href="styles.css">
+    <title>报单管家</title>
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="brand"><span class="brand-mark">报</span><span>报单管家</span><span id="sync-state" class="status-pill local">仅本地</span></div>
+        <div class="top-actions">
+          <button class="button button-quiet" data-action="sync">同步</button>
+          <button class="button button-quiet" data-action="open-settings">设置</button>
+        </div>
+      </header>
+      <div class="layout">
+        <aside class="sidebar" aria-label="主导航">
+          <nav class="nav-list">
+            <button class="nav-item active" data-view="dashboard">总览</button>
+            <button class="nav-item" data-view="reports">报单</button>
+            <button class="nav-item" data-view="shipments">快递</button>
+            <button class="nav-item" data-view="inventory">仓库</button>
+            <button class="nav-item" data-view="refunds">退款</button>
+            <button class="nav-item" data-view="settings">设置</button>
+          </nav>
+          <div class="sidebar-note">离线可用 · 联网自动同步</div>
+        </aside>
+        <main id="main-content" class="main-content"></main>
+      </div>
+    </div>
+    <div id="modal-root"></div>
+    <div id="toast-root" aria-live="polite"></div>
+    <script src="shared/domain.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>

@@ -1,0 +1,72 @@
+# 报单管家
+
+单人使用的 Android 报单、库存、快递和返款记录工具。APP 在无法连接服务器时仍然可以录入和查询，恢复网络后会自动同步。
+
+## 功能
+
+- 报单：时间、原消息、多个商品行、数量、实际付款、预计返款、预计返利。
+- 快递：单号、快递价格、多个商品行；保存时按报单时间先进先出扣除库存，并自动计算商品实际价格和预计返款/返利。
+- 查询和修改：报单、快递、实际返款和退款记录均可查询、编辑或作废。
+- 返款：一笔快递可以分多次登记实际返款。
+- 退款：只能从剩余可用库存选择商品批次，退款数量退出仓库，并从付款和预期收益统计中扣除。
+- 统计：累计商品付款、累计快递费用、预计未返款、已返款、利润、纯利润和利率。
+
+统计公式：
+
+```text
+预计收益 = 已发快递商品的预计返款 + 预计返利
+预计未返款 = max(预计收益 - 已返款, 0)
+利润 = 预计未返款 + 已返款
+纯利润 = 利润 - 快递费用
+利率 = 纯利润 / 累计商品付款
+```
+
+退款商品会从累计商品付款和预计收益中排除。金额以分保存，界面按人民币两位小数输入和显示。
+
+## 本地运行
+
+```bash
+npm install
+cp .env.example .env
+npm start
+```
+
+默认监听 `127.0.0.1:3011`。第一次启动会在 `runtime/sync-token` 生成权限为 `0600` 的同步令牌。把令牌填入 APP 的“设置”页面；令牌和 SQLite 数据库都不会被 Git 跟踪。
+
+开发检查：
+
+```bash
+npm test
+npm run android:assets
+```
+
+## 对外访问
+
+建议使用单独子域名，例如 `order.your-domain.example`，不要把真实域名直接写进公开仓库。把 `deploy/Caddyfile.snippet` 复制后替换为实际域名，再合并到现有 Caddy 配置，并让 frpc/反向代理只转发到本机 `3011`。
+
+APP 设置里填写 HTTPS 地址，例如：
+
+```text
+https://order.your-domain.example
+```
+
+即使没有登录页面，API 仍然要求同步令牌。令牌只存在服务端权限文件和 APP 本机存储，仓库不包含真实地址、令牌、数据库或业务数据。
+
+## Android 工程
+
+Android 源码在 `android/`，前端资源由下面的脚本同步到 APK 资源目录：
+
+```bash
+npm run android:assets
+cd android
+gradle assembleDebug
+```
+
+当前开发机没有 Android SDK/Gradle，因此这里只能完成源码和服务端测试；安装 Android SDK 和 Gradle 后即可构建 APK。APP 是无第三方运行库的 WebView 壳，数据由内置前端保存到 Android WebView 本地存储。
+
+## 隐私和 Git
+
+- 远端仓库应设为 Private。
+- `.env`、`runtime/`、数据库、同步令牌、APK 和 Android `local.properties` 已加入 `.gitignore`。
+- Git 提交前不要把真实域名、令牌、导出 JSON 或日志放入仓库。
+- `runtime/sync-token` 是访问业务数据的凭据，不要复制到聊天、截图或公开 issue。
