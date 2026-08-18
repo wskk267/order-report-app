@@ -63,7 +63,7 @@ test('partial settlements and refunds update derived values', () => {
     settlement: { id: 'settle1', shipmentId: 's1', amountCents: 500, settledAt: '2026-08-03' },
   }), { idFactory, now: '2026-08-03T11:00' }).state;
   state = Domain.applyOperation(state, operation('refund.create', {
-    refund: { id: 'refund1', reportItemId: 'r1_item', quantity: 1, amountCents: 1000, refundedAt: '2026-08-04' },
+    refund: { id: 'refund1', reportItemId: 'r1_item', quantity: 1, amountCents: 1, refundedAt: '2026-08-04' },
   }), { idFactory, now: '2026-08-04T11:00' }).state;
   const summary = Domain.stats(state);
   assert.equal(summary.totalPurchaseCents, 3000);
@@ -73,6 +73,7 @@ test('partial settlements and refunds update derived values', () => {
   assert.equal(summary.profitCents, 600);
   assert.equal(summary.pureProfitCents, 300);
   assert.equal(Domain.inventoryLots(state)[0].availableQuantity, 1);
+  assert.equal(state.refunds[0].amountCents, 1000);
 });
 
 test('shipment update releases its old FIFO allocation before reassigning', () => {

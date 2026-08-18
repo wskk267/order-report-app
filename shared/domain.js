@@ -33,6 +33,10 @@
       else if (!Array.isArray(state[key])) state[key] = [];
     }
     state.schemaVersion = SCHEMA_VERSION;
+    for (const refund of state.refunds) {
+      const item = state.reportItems.find((row) => row.id === refund.reportItemId);
+      if (item) refund.amountCents = amountForQuantity(item.actualPaymentCents, item.quantity, refund.quantity);
+    }
     return state;
   }
 
@@ -251,6 +255,7 @@
       };
       if (old) Object.assign(old, next);
       else state.reportItems.push(next);
+      refreshRefundAmounts(state, item.id);
     }
     return { state, result: { id: report.id } };
   }
@@ -324,6 +329,14 @@
     return { state, result: { id: shipment.id } };
   }
 
+  function refreshRefundAmounts(state, reportItemId) {
+    const item = itemById(state, reportItemId);
+    if (!item) return;
+    for (const refund of state.refunds.filter((row) => row.reportItemId === reportItemId && isActive(row))) {
+      refund.amountCents = amountForQuantity(item.actualPaymentCents, item.quantity, refund.quantity);
+    }
+  }
+
   function addSettlement(state, payload, now, idFactory) {
     const input = payload.settlement || payload;
     if (!shipmentById(state, input.shipmentId)) throw new Error('快递不存在');
@@ -379,7 +392,7 @@
       id: input.id || idFactory('refund'),
       reportItemId: item.id,
       quantity,
-      amountCents: parseMoney(input.amountCents ?? 0, '退款金额'),
+      amountCents: amountForQuantity(item.actualPaymentCents, item.quantity, quantity),
       refundedAt: text(input.refundedAt, '退款时间'),
       note: text(input.note, '备注', false),
       createdAt: input.createdAt || now,
@@ -402,7 +415,7 @@
     if (nextQuantity + otherRefunded + shipped > item.quantity) throw new Error('退款数量超过可用库存');
     Object.assign(refund, {
       quantity: nextQuantity,
-      amountCents: parseMoney(input.amountCents ?? refund.amountCents, '退款金额'),
+      amountCents: amountForQuantity(item.actualPaymentCents, item.quantity, nextQuantity),
       refundedAt: text(input.refundedAt, '退款时间'),
       note: text(input.note, '备注', false),
       updatedAt: now,

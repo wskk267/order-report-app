@@ -381,7 +381,19 @@
     const currentLot = refund ? app.state.reportItems.find((item) => item.id === refund.reportItemId) : null;
     const selectable = refund && currentLot ? [{ ...lots.find((lot) => lot.reportItemId === refund.reportItemId), availableQuantity: (lots.find((lot) => lot.reportItemId === refund.reportItemId)?.availableQuantity || 0) + refund.quantity }] : lots;
     const options = selectable.filter(Boolean).map((lot) => `<option value="${esc(lot.reportItemId)}" ${lot.reportItemId === (itemId || refund?.reportItemId) ? 'selected' : ''}>${esc(lot.productName)} · ${esc(dateText(lot.sourceDate))} · 可退 ${lot.availableQuantity}</option>`).join('');
-    openModal(refund ? '编辑退款' : '登记退款', `<form data-form="refund"><div class="form-grid"><div class="field full"><label>商品批次</label><select class="select" name="reportItemId" required><option value="">选择库存批次</option>${options}</select></div><div class="field"><label>退款数量</label><input class="input" name="quantity" type="number" min="1" step="1" value="${esc(refund?.quantity || 1)}" required></div><div class="field"><label>退款金额</label><input class="input" name="amount" inputmode="decimal" value="${esc(valueMoney(refund?.amountCents || 0))}" required></div><div class="field"><label>退款时间</label><input class="input" name="refundedAt" type="datetime-local" value="${esc(dateInputValue(refund?.refundedAt))}" required></div><div class="field"><label>备注</label><input class="input" name="note" value="${esc(refund?.note || '')}" placeholder="可选"></div></div><div class="warning-box" style="margin-top:16px">退款会使商品退出仓库，并从累计商品付款、预计收益和利率统计中扣除。</div><div class="form-actions"><button class="button button-quiet" type="button" data-action="close-modal">取消</button><button class="button" type="submit">保存退款</button></div><input type="hidden" name="id" value="${esc(refund?.id || '')}"></form>`);
+    const selectedItem = app.state.reportItems.find((item) => item.id === (itemId || refund?.reportItemId));
+    const calculatedAmount = selectedItem ? Domain.amountForQuantity(selectedItem.actualPaymentCents, selectedItem.quantity, refund?.quantity || 1) : 0;
+    openModal(refund ? '编辑退款' : '登记退款', `<form data-form="refund"><div class="form-grid"><div class="field full"><label>商品批次</label><select class="select" name="reportItemId" required><option value="">选择库存批次</option>${options}</select></div><div class="field"><label>退款数量</label><input class="input" name="quantity" type="number" min="1" step="1" value="${esc(refund?.quantity || 1)}" required></div><div class="field"><label>退款金额（自动计算）</label><input class="input" name="amount" value="${esc(valueMoney(calculatedAmount))}" readonly aria-readonly="true"></div><div class="field"><label>退款时间</label><input class="input" name="refundedAt" type="datetime-local" value="${esc(dateInputValue(refund?.refundedAt))}" required></div><div class="field"><label>备注</label><input class="input" name="note" value="${esc(refund?.note || '')}" placeholder="可选"></div></div><div class="info-box" style="margin-top:16px">退款金额 = 商品实际付款总额 × 退款数量 ÷ 商品报单数量。金额由系统生成，不需要手填。</div><div class="warning-box" style="margin-top:12px">退款会使商品退出仓库，并从累计商品付款、预计收益和利率统计中扣除。</div><div class="form-actions"><button class="button button-quiet" type="button" data-action="close-modal">取消</button><button class="button" type="submit">保存退款</button></div><input type="hidden" name="id" value="${esc(refund?.id || '')}"></form>`);
+    updateRefundAmount($('form[data-form="refund"]'));
+  }
+
+  function updateRefundAmount(form) {
+    if (!form?.elements?.amount) return;
+    const item = app.state.reportItems.find((row) => row.id === form.elements.reportItemId.value);
+    const quantity = Number(form.elements.quantity.value || 0);
+    form.elements.amount.value = item && quantity > 0
+      ? valueMoney(Domain.amountForQuantity(item.actualPaymentCents, item.quantity, quantity))
+      : valueMoney(0);
   }
 
   function localExport() {
@@ -455,12 +467,19 @@
   });
 
   document.addEventListener('input', (event) => {
+    const refundForm = event.target.closest?.('form[data-form="refund"]');
+    if (refundForm) updateRefundAmount(refundForm);
     if (event.target.dataset.search) {
       app.search = event.target.value;
       render();
       const input = $(`[data-search="${event.target.dataset.search}"]`);
       if (input) { input.focus(); input.setSelectionRange(app.search.length, app.search.length); }
     }
+  });
+
+  document.addEventListener('change', (event) => {
+    const refundForm = event.target.closest?.('form[data-form="refund"]');
+    if (refundForm) updateRefundAmount(refundForm);
   });
 
   document.addEventListener('submit', (event) => {
@@ -477,7 +496,7 @@
         const payload = { settlement: { id: form.elements.id.value || Domain.makeId('settlement'), shipmentId: form.elements.shipmentId.value, amountCents: parseMoneyInput(form.elements.amount.value, '实际返款金额'), settledAt: form.elements.settledAt.value, note: form.elements.note.value.trim() } };
         dispatch(form.elements.id.value ? 'settlement.update' : 'settlement.create', payload);
       } else if (form.dataset.form === 'refund') {
-        const payload = { refund: { id: form.elements.id.value || Domain.makeId('refund'), reportItemId: form.elements.reportItemId.value, quantity: Number(form.elements.quantity.value), amountCents: parseMoneyInput(form.elements.amount.value, '退款金额'), refundedAt: form.elements.refundedAt.value, note: form.elements.note.value.trim() } };
+        const payload = { refund: { id: form.elements.id.value || Domain.makeId('refund'), reportItemId: form.elements.reportItemId.value, quantity: Number(form.elements.quantity.value), refundedAt: form.elements.refundedAt.value, note: form.elements.note.value.trim() } };
         dispatch(form.elements.id.value ? 'refund.update' : 'refund.create', payload);
       } else if (form.dataset.form === 'settings') {
         app.settings.apiBase = form.elements.apiBase.value.trim().replace(/\/$/, '');

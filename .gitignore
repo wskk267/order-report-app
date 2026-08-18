@@ -10,6 +10,7 @@ android/app/build/
 android/local.properties
 *.keystore
 *.jks
+android/keystore.properties
 *.apk
 *.aab
 .DS_Store
