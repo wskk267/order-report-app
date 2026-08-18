@@ -2,7 +2,7 @@
 
 ## 方案结构
 
-这个项目不是 Flutter 项目，而是一个原生 Android WebView 壳，前端业务页面和离线存储运行在 WebView 中。
+这个项目不是 Flutter 项目，而是一个原生 Android WebView 壳，前端业务页面和离线存储运行在 WebView 中。整个项目可以在没有图形界面的 Linux 服务器上完成构建，不需要 Android Studio。
 
 - `android/app/src/main/java/com/orderreport/app/MainActivity.java`：Android 入口，加载内置页面。
 - `android/app/src/main/AndroidManifest.xml`：网络权限、应用入口和 HTTPS 安全配置。
@@ -15,25 +15,85 @@
 
 安装以下工具：
 
-- Android Studio，包含 Android SDK Platform 35 和 Build Tools。
+- Android SDK Command-line Tools。
+- Android SDK Platform 35、Platform-Tools 和 Build Tools 35.0.0。
 - JDK 17。
 - Gradle 8.7 或 Android Studio 自带的 Gradle。
 - Node.js 18.17 或更高版本。
 
-确认环境：
+确认 Java 和 Node 环境：
 
 ```bash
 java -version
 node --version
+```
+
+如果系统还没有 JDK 17：
+
+```bash
+sudo apt-get update
+sudo apt-get install -y openjdk-17-jdk unzip
+export JAVA_HOME=/usr/lib/jvm/java-17-openjdk-amd64
+export PATH="$JAVA_HOME/bin:$PATH"
+java -version
+```
+
+## 安装命令行 Android SDK
+
+下面把 SDK 安装到 `/mnt/nvme/android-sdk`，不需要 root 权限：
+
+```bash
+SDK_ROOT=/mnt/nvme/android-sdk
+mkdir -p "$SDK_ROOT/cmdline-tools" /tmp/android-cmdline-tools
+curl -fL https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip \
+  -o /tmp/android-commandlinetools.zip
+unzip -q /tmp/android-commandlinetools.zip -d /tmp/android-cmdline-tools
+rm -rf "$SDK_ROOT/cmdline-tools/latest"
+mv /tmp/android-cmdline-tools/cmdline-tools "$SDK_ROOT/cmdline-tools/latest"
+
+SDKMANAGER="$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
+yes | "$SDKMANAGER" --sdk_root="$SDK_ROOT" --licenses
+"$SDKMANAGER" --sdk_root="$SDK_ROOT" \
+  "platform-tools" \
+  "platforms;android-35" \
+  "build-tools;35.0.0"
+```
+
+设置当前终端的 SDK 路径：
+
+```bash
+export ANDROID_SDK_ROOT=/mnt/nvme/android-sdk
+export PATH="$ANDROID_SDK_ROOT/platform-tools:$ANDROID_SDK_ROOT/cmdline-tools/latest/bin:$PATH"
+```
+
+确认：
+
+```bash
 adb version
+sdkmanager --list | head -n 30
+```
+
+## 安装 Gradle 8.7
+
+Ubuntu 自带的 Gradle 可能版本太旧，直接下载到 `/mnt/nvme/gradle`：
+
+```bash
+GRADLE_ROOT=/mnt/nvme/gradle
+mkdir -p "$GRADLE_ROOT"
+curl -fL https://services.gradle.org/distributions/gradle-8.7-bin.zip \
+  -o /tmp/gradle-8.7-bin.zip
+unzip -q /tmp/gradle-8.7-bin.zip -d "$GRADLE_ROOT"
+export PATH="$GRADLE_ROOT/gradle-8.7/bin:$PATH"
 gradle --version
 ```
 
-如果使用 Android Studio，直接用 Android Studio 打开项目里的 `android/` 目录，等待 Gradle 同步完成即可。命令行构建时，确保 `ANDROID_HOME` 指向 Android SDK，例如：
+## 配置项目 SDK 路径
+
+`local.properties` 已被 Git 忽略，可以直接生成：
 
 ```bash
-export ANDROID_HOME="$HOME/Android/Sdk"
-export PATH="$ANDROID_HOME/platform-tools:$ANDROID_HOME/cmdline-tools/latest/bin:$PATH"
+printf 'sdk.dir=/mnt/nvme/android-sdk\n' \
+  > /mnt/nvme/item/order-report-app/android/local.properties
 ```
 
 ## 生成 Debug APK
@@ -44,7 +104,7 @@ export PATH="$ANDROID_HOME/platform-tools:$ANDROID_HOME/cmdline-tools/latest/bin
 npm install
 npm run android:assets
 cd android
-gradle assembleDebug
+gradle --no-daemon assembleDebug
 ```
 
 生成文件：
@@ -59,8 +119,6 @@ android/app/build/outputs/apk/debug/app-debug.apk
 adb devices
 adb install -r android/app/build/outputs/apk/debug/app-debug.apk
 ```
-
-也可以在 Android Studio 中选择 `app` 配置并点击 `Build > Build APK(s)`。
 
 ## 生成 Release APK
 
@@ -77,7 +135,7 @@ keytool -genkeypair -v \
 
 ```bash
 cd android
-gradle assembleRelease
+gradle --no-daemon assembleRelease
 ```
 
 不要把 `.jks`、密码、`keystore.properties` 或已签名 APK 上传到公开 GitHub 仓库。
@@ -90,7 +148,7 @@ gradle assembleRelease
 npm test
 npm run android:assets
 cd android
-gradle assembleDebug
+gradle --no-daemon assembleDebug
 ```
 
 退款比例逻辑在 `shared/domain.js` 的 `addRefund` 和 `updateRefund` 中；Android 页面中的只读金额展示在 `public/app.js` 的 `refundEditor` 和 `updateRefundAmount` 中。资源同步脚本会把最新代码复制到 `android/app/src/main/assets/`，否则 APK 可能仍然包含旧页面。
