@@ -245,7 +245,7 @@
   function renderReports() {
     return `${pageHeading('Records', '报单', '商品付款、预计返款和预计返利', '<button class="button" data-action="new-report">新增报单</button>')}
       <div class="toolbar"><div class="toolbar-group"><input class="input search-input" data-search="reports" value="${esc(app.search)}" placeholder="搜索商品、原消息、时间"></div><div class="toolbar-group"><span class="muted small">${activeReports().length} 笔有效报单</span></div></div>
-      <section class="panel"><div class="table-wrap"><table><thead><tr><th>时间</th><th>商品</th><th>实际付款</th><th>预计返款</th><th>预计返利</th><th>原消息</th><th>操作</th></tr></thead><tbody>${reportRows()}</tbody></table></div></section>`;
+      <section class="panel"><div class="table-wrap"><table class="mobile-table report-table"><thead><tr><th>时间</th><th>商品</th><th>实际付款</th><th>预计返款</th><th>预计返利</th><th>原消息</th><th>操作</th></tr></thead><tbody>${reportRows()}</tbody></table></div></section>`;
   }
 
   function shipmentRows() {
@@ -263,7 +263,7 @@
   function renderShipments() {
     return `${pageHeading('Fulfillment', '快递', '从剩余仓库按先进先出分配商品', '<button class="button" data-action="new-shipment">新增快递</button>')}
       <div class="toolbar"><div class="toolbar-group"><input class="input search-input" data-search="shipments" value="${esc(app.search)}" placeholder="搜索单号、商品、备注"></div><div class="toolbar-group"><span class="muted small">${shipmentViews().length} 笔有效快递</span></div></div>
-      <section class="panel"><div class="table-wrap"><table><thead><tr><th>发出时间</th><th>单号</th><th>快递内容</th><th>快递价格</th><th>预计返款+返利</th><th>已返款</th><th>状态</th><th>操作</th></tr></thead><tbody>${shipmentRows()}</tbody></table></div></section>`;
+      <section class="panel"><div class="table-wrap"><table class="mobile-table shipment-table"><thead><tr><th>发出时间</th><th>单号</th><th>快递内容</th><th>快递价格</th><th>预计返款+返利</th><th>已返款</th><th>状态</th><th>操作</th></tr></thead><tbody>${shipmentRows()}</tbody></table></div></section>`;
   }
 
   function renderInventory() {
@@ -273,7 +273,7 @@
     const availableValue = lots.reduce((sum, lot) => sum + Domain.amountForQuantity(lot.actualPaymentCents, lot.quantity, lot.availableQuantity), 0);
     return `${pageHeading('Inventory', '仓库', '当前未发快递、未退款的商品批次', '<button class="button" data-action="new-refund">登记退款</button>')}
       <section class="stock-summary"><div class="panel"><div class="muted small">可用商品种类</div><div class="summary-value">${aggregate.length}</div></div><div class="panel"><div class="muted small">可用商品数量</div><div class="summary-value number">${availableQuantity}</div></div><div class="panel"><div class="muted small">可用商品成本</div><div class="summary-value money">${money(availableValue)}</div></div></section>
-      <section class="panel"><div class="panel-heading"><h2>库存批次</h2><span class="muted small">按报单时间排序</span></div><div class="table-wrap"><table><thead><tr><th>商品</th><th>报单时间</th><th>批次数量</th><th>剩余</th><th>单位成本</th><th>单位预计收益</th><th>操作</th></tr></thead><tbody>${lots.length ? lots.map((lot) => `<tr><td><strong>${esc(lot.productName)}</strong></td><td>${esc(dateText(lot.sourceDate))}</td><td class="number">${lot.quantity}</td><td class="number"><span class="tag tag-green">${lot.availableQuantity}</span></td><td class="money">${money(Domain.amountForQuantity(lot.actualPaymentCents, lot.quantity, 1))}</td><td class="money">${money(Domain.amountForQuantity(lot.expectedRefundCents + lot.expectedRebateCents, lot.quantity, 1))}</td><td><button class="link-button" data-action="new-refund" data-id="${esc(lot.reportItemId)}">退款</button></td></tr>`).join('') : `<tr><td colspan="7">${emptyState('仓库为空', '新增报单后会在这里形成可用库存')}</td></tr>`}</tbody></table></div></section>`;
+      <section class="panel"><div class="panel-heading"><h2>库存批次</h2><span class="muted small">按报单时间排序</span></div><div class="table-wrap"><table class="mobile-table inventory-table"><thead><tr><th>商品</th><th>报单时间</th><th>批次数量</th><th>剩余</th><th>单位成本</th><th>单位预计收益</th><th>操作</th></tr></thead><tbody>${lots.length ? lots.map((lot) => `<tr><td><strong>${esc(lot.productName)}</strong></td><td>${esc(dateText(lot.sourceDate))}</td><td class="number">${lot.quantity}</td><td class="number"><span class="tag tag-green">${lot.availableQuantity}</span></td><td class="money">${money(Domain.amountForQuantity(lot.actualPaymentCents, lot.quantity, 1))}</td><td class="money">${money(Domain.amountForQuantity(lot.expectedRefundCents + lot.expectedRebateCents, lot.quantity, 1))}</td><td><button class="link-button" data-action="new-refund" data-id="${esc(lot.reportItemId)}">退款</button></td></tr>`).join('') : `<tr><td colspan="7">${emptyState('仓库为空', '新增报单后会在这里形成可用库存')}</td></tr>`}</tbody></table></div></section>`;
   }
 
   function refundRows() {
@@ -288,7 +288,7 @@
 
   function renderRefunds() {
     return `${pageHeading('Returns', '退款', '从可用库存退出商品并保留流水', '<button class="button" data-action="new-refund">登记退款</button>')}
-      <section class="panel"><div class="table-wrap"><table><thead><tr><th>退款时间</th><th>商品批次</th><th>数量</th><th>退款金额</th><th>备注</th><th>状态</th><th>操作</th></tr></thead><tbody>${refundRows()}</tbody></table></div></section>`;
+      <section class="panel"><div class="table-wrap"><table class="mobile-table refund-table"><thead><tr><th>退款时间</th><th>商品批次</th><th>数量</th><th>退款金额</th><th>备注</th><th>状态</th><th>操作</th></tr></thead><tbody>${refundRows()}</tbody></table></div></section>`;
   }
 
   function renderSettings() {

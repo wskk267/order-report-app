@@ -228,3 +228,147 @@ tr:last-child td { border-bottom: 0; }
   .form-actions { flex-wrap: wrap; }
   .form-actions .button { flex: 1; }
 }
+
+@media (max-width: 620px) {
+  html { touch-action: manipulation; }
+  body { overflow-x: hidden; }
+  .topbar {
+    height: calc(58px + env(safe-area-inset-top));
+    padding: env(safe-area-inset-top) 12px 0;
+  }
+  .layout {
+    display: block;
+    min-height: calc(100vh - 58px);
+    padding-bottom: calc(72px + env(safe-area-inset-bottom));
+  }
+  .sidebar {
+    background: rgba(255, 254, 250, .98);
+    border-bottom: 0;
+    border-right: 0;
+    border-top: 1px solid var(--line);
+    bottom: 0;
+    box-shadow: 0 -5px 20px rgba(37, 40, 34, .08);
+    left: 0;
+    padding: 5px 7px env(safe-area-inset-bottom);
+    position: fixed;
+    right: 0;
+    top: auto;
+    z-index: 10;
+  }
+  .nav-list {
+    display: grid;
+    gap: 2px;
+    grid-template-columns: repeat(6, minmax(0, 1fr));
+    overflow: visible;
+  }
+  .nav-item {
+    border-radius: 7px;
+    font-size: 11px;
+    min-height: 48px;
+    padding: 8px 2px;
+    text-align: center;
+  }
+  .main-content { padding: 18px 12px 26px; }
+  .top-actions { gap: 4px; }
+  .top-actions .button { min-height: 32px; padding: 0 9px; }
+  .brand { gap: 7px; }
+  .brand-mark { height: 28px; width: 28px; }
+  .mobile-table,
+  .editor-table {
+    display: block;
+    min-width: 0;
+    width: 100%;
+  }
+  .mobile-table thead,
+  .editor-table thead { display: none; }
+  .mobile-table tbody,
+  .editor-table tbody { display: block; }
+  .mobile-table tr {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    box-shadow: 0 4px 14px rgba(37, 40, 34, .045);
+    display: block;
+    margin: 10px;
+    padding: 10px 13px;
+  }
+  .mobile-table tr:first-child { margin-top: 12px; }
+  .mobile-table td {
+    align-items: start;
+    border: 0;
+    display: grid;
+    font-size: 13px;
+    gap: 9px;
+    grid-template-columns: 82px minmax(0, 1fr);
+    overflow-wrap: anywhere;
+    padding: 5px 0;
+    text-align: right;
+  }
+  .mobile-table td::before {
+    color: var(--muted);
+    content: "";
+    font-size: 11px;
+    font-weight: 700;
+    text-align: left;
+  }
+  .mobile-table td[colspan] {
+    display: block;
+    padding: 0;
+    text-align: center;
+  }
+  .mobile-table td[colspan]::before { display: none; }
+  .mobile-table .inline-actions { justify-content: flex-end; }
+  .report-table td:nth-child(1)::before { content: "时间"; }
+  .report-table td:nth-child(2)::before { content: "商品"; }
+  .report-table td:nth-child(3)::before { content: "实际付款"; }
+  .report-table td:nth-child(4)::before { content: "预计返款"; }
+  .report-table td:nth-child(5)::before { content: "预计返利"; }
+  .report-table td:nth-child(6)::before { content: "原消息"; }
+  .report-table td:nth-child(7)::before { content: "操作"; }
+  .shipment-table td:nth-child(1)::before { content: "发出时间"; }
+  .shipment-table td:nth-child(2)::before { content: "单号"; }
+  .shipment-table td:nth-child(3)::before { content: "快递内容"; }
+  .shipment-table td:nth-child(4)::before { content: "快递价格"; }
+  .shipment-table td:nth-child(5)::before { content: "预计收益"; }
+  .shipment-table td:nth-child(6)::before { content: "已返款"; }
+  .shipment-table td:nth-child(7)::before { content: "状态"; }
+  .shipment-table td:nth-child(8)::before { content: "操作"; }
+  .inventory-table td:nth-child(1)::before { content: "商品"; }
+  .inventory-table td:nth-child(2)::before { content: "报单时间"; }
+  .inventory-table td:nth-child(3)::before { content: "批次数量"; }
+  .inventory-table td:nth-child(4)::before { content: "剩余"; }
+  .inventory-table td:nth-child(5)::before { content: "单位成本"; }
+  .inventory-table td:nth-child(6)::before { content: "单位收益"; }
+  .inventory-table td:nth-child(7)::before { content: "操作"; }
+  .refund-table td:nth-child(1)::before { content: "退款时间"; }
+  .refund-table td:nth-child(2)::before { content: "商品批次"; }
+  .refund-table td:nth-child(3)::before { content: "数量"; }
+  .refund-table td:nth-child(4)::before { content: "退款金额"; }
+  .refund-table td:nth-child(5)::before { content: "备注"; }
+  .refund-table td:nth-child(6)::before { content: "状态"; }
+  .refund-table td:nth-child(7)::before { content: "操作"; }
+  .settlement-list { min-width: 0; text-align: right; }
+  .settlement-entry { white-space: normal; }
+  .editor-table tr.report-item-editor,
+  .editor-table tr.shipment-item-editor {
+    border: 1px solid var(--line);
+    border-radius: 7px;
+    display: grid;
+    gap: 9px;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    margin-bottom: 10px;
+    padding: 10px;
+  }
+  .editor-table td { border: 0; display: block; padding: 0; }
+  .editor-table .input,
+  .editor-table .select { min-width: 0; width: 100%; }
+  .editor-table .report-item-editor td:first-child,
+  .editor-table .report-item-editor td:last-child,
+  .editor-table .shipment-item-editor td:first-child,
+  .editor-table .shipment-item-editor td:last-child { grid-column: 1 / -1; }
+  .editor-table .report-item-editor td:last-child,
+  .editor-table .shipment-item-editor td:last-child { text-align: right; }
+  .input, .select, .textarea { font-size: 16px; }
+  .modal-body { overflow-x: hidden; }
+  #toast-root { bottom: calc(78px + env(safe-area-inset-bottom)); right: 12px; }
+}
