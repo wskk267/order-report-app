@@ -43,14 +43,14 @@ test('FIFO allocation separates expected refund and rebate in stats', () => {
   assert.equal(Domain.inventoryLots(state).find((row) => row.reportItemId === 'r_old_item'), undefined);
   assert.equal(Domain.inventoryLots(state).find((row) => row.reportItemId === 'r_new_item').availableQuantity, 1);
   const summary = Domain.stats(state);
-  assert.equal(summary.totalPurchaseCents, 2800);
+  assert.equal(summary.totalPurchaseCents, 2200);
   assert.equal(summary.expectedIncomeCents, 510);
   assert.equal(summary.expectedRefundCents, 400);
   assert.equal(summary.expectedRebateCents, 110);
   assert.equal(summary.outstandingCents, 400);
-  assert.equal(summary.profitCents, -2290);
-  assert.equal(summary.pureProfitCents, -2410);
-  assert.equal(summary.rate, -2410 / 2800);
+  assert.equal(summary.profitCents, -1690);
+  assert.equal(summary.pureProfitCents, -1810);
+  assert.equal(summary.rate, -1810 / 2200);
 });
 
 test('partial settlements and refunds update derived values', () => {
@@ -68,14 +68,14 @@ test('partial settlements and refunds update derived values', () => {
     refund: { id: 'refund1', reportItemId: 'r1_item', quantity: 1, amountCents: 1, refundedAt: '2026-08-04' },
   }), { idFactory, now: '2026-08-04T11:00' }).state;
   const summary = Domain.stats(state);
-  assert.equal(summary.totalPurchaseCents, 3000);
+  assert.equal(summary.totalPurchaseCents, 2000);
   assert.equal(summary.expectedIncomeCents, 600);
   assert.equal(summary.expectedRefundCents, 400);
   assert.equal(summary.expectedRebateCents, 200);
   assert.equal(summary.returnedCents, 300);
   assert.equal(summary.outstandingCents, 100);
-  assert.equal(summary.profitCents, -2400);
-  assert.equal(summary.pureProfitCents, -2700);
+  assert.equal(summary.profitCents, -1400);
+  assert.equal(summary.pureProfitCents, -1700);
   assert.equal(Domain.inventoryLots(state)[0].availableQuantity, 1);
   assert.equal(state.refunds[0].amountCents, 1000);
 });

@@ -358,7 +358,7 @@
     const shipments = shipmentViews().sort((a, b) => String(b.shipment.shippedAt).localeCompare(String(a.shipment.shippedAt))).slice(0, 5);
     return `${pageHeading('Workspace', '总览', '收入、库存和返款状态', '<button class="button" data-action="new-report">新增报单</button>')}
       <section class="card-grid">
-        <article class="stat-card accent-green"><div class="stat-label">累计商品付款</div><div class="stat-value money">${money(summary.totalPurchaseCents)}</div><div class="stat-foot">已扣除退款商品</div></article>
+        <article class="stat-card accent-green"><div class="stat-label">累计商品付款</div><div class="stat-value money">${money(summary.totalPurchaseCents)}</div><div class="stat-foot">仅统计已发商品，未发库存不计入</div></article>
         <article class="stat-card accent-orange"><div class="stat-label">累计快递费用</div><div class="stat-value money">${money(summary.totalShippingCents)}</div><div class="stat-foot">全部有效快递</div></article>
         <article class="stat-card accent-blue"><div class="stat-label">预计未返款</div><div class="stat-value money">${money(summary.outstandingCents)}</div><div class="stat-foot">预计返款 ${money(summary.expectedRefundCents)} · 预计返利 ${money(summary.expectedRebateCents)}</div></article>
         <article class="stat-card accent-green"><div class="stat-label">已返款</div><div class="stat-value money">${money(summary.returnedCents)}</div><div class="stat-foot">利润含预计返利 ${money(summary.profitCents)}</div></article>

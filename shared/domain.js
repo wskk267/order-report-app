@@ -462,8 +462,8 @@
     const totalPurchaseCents = state.reportItems
       .filter((item) => isActive(item) && activeReports.has(item.reportId))
       .reduce((sum, item) => {
-        const refunded = refundQuantity(state, item.id);
-        return sum + amountForQuantity(item.actualPaymentCents, item.quantity, item.quantity - refunded);
+        const shipped = shipmentItemQuantity(state, item.id);
+        return sum + amountForQuantity(item.actualPaymentCents, item.quantity, shipped);
       }, 0);
     const totalShippingCents = state.shipments
       .filter(isActive)
