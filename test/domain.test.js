@@ -46,9 +46,9 @@ test('express allocation follows FIFO and includes expected rebate in income', (
   assert.equal(summary.totalPurchaseCents, 2800);
   assert.equal(summary.expectedIncomeCents, 510);
   assert.equal(summary.outstandingCents, 510);
-  assert.equal(summary.profitCents, 510);
-  assert.equal(summary.pureProfitCents, 390);
-  assert.equal(summary.rate, 390 / 2800);
+  assert.equal(summary.profitCents, -2290);
+  assert.equal(summary.pureProfitCents, -2410);
+  assert.equal(summary.rate, -2410 / 2800);
 });
 
 test('partial settlements and refunds update derived values', () => {
@@ -70,8 +70,8 @@ test('partial settlements and refunds update derived values', () => {
   assert.equal(summary.expectedIncomeCents, 600);
   assert.equal(summary.returnedCents, 500);
   assert.equal(summary.outstandingCents, 100);
-  assert.equal(summary.profitCents, 600);
-  assert.equal(summary.pureProfitCents, 300);
+  assert.equal(summary.profitCents, -2400);
+  assert.equal(summary.pureProfitCents, -2700);
   assert.equal(Domain.inventoryLots(state)[0].availableQuantity, 1);
   assert.equal(state.refunds[0].amountCents, 1000);
 });

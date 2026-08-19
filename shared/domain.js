@@ -480,7 +480,7 @@
       .filter((settlement) => isActive(settlement) && shipmentById(state, settlement.shipmentId))
       .reduce((sum, settlement) => sum + Number(settlement.amountCents || 0), 0);
     const outstandingCents = Math.max(expectedIncomeCents - returnedCents, 0);
-    const profitCents = outstandingCents + returnedCents;
+    const profitCents = outstandingCents + returnedCents - totalPurchaseCents;
     const pureProfitCents = profitCents - totalShippingCents;
     return {
       totalPurchaseCents,

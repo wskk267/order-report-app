@@ -361,7 +361,7 @@
         <article class="stat-card accent-green"><div class="stat-label">累计商品付款</div><div class="stat-value money">${money(summary.totalPurchaseCents)}</div><div class="stat-foot">已扣除退款商品</div></article>
         <article class="stat-card accent-orange"><div class="stat-label">累计快递费用</div><div class="stat-value money">${money(summary.totalShippingCents)}</div><div class="stat-foot">全部有效快递</div></article>
         <article class="stat-card accent-blue"><div class="stat-label">预计未返款</div><div class="stat-value money">${money(summary.outstandingCents)}</div><div class="stat-foot">预计收益 ${money(summary.expectedIncomeCents)}</div></article>
-        <article class="stat-card accent-green"><div class="stat-label">已返款</div><div class="stat-value money">${money(summary.returnedCents)}</div><div class="stat-foot">利润 ${money(summary.profitCents)}</div></article>
+        <article class="stat-card accent-green"><div class="stat-label">已返款</div><div class="stat-value money">${money(summary.returnedCents)}</div><div class="stat-foot">扣除商品付款后利润 ${money(summary.profitCents)}</div></article>
         <article class="stat-card accent-orange"><div class="stat-label">纯利润</div><div class="stat-value money">${money(summary.pureProfitCents)}</div><div class="stat-foot">利润减快递费用</div></article>
         <article class="stat-card accent-blue"><div class="stat-label">利率</div><div class="stat-value">${percent(summary.rate)}</div><div class="stat-foot">纯利润 / 累计商品付款</div></article>
       </section>
