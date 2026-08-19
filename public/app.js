@@ -639,7 +639,8 @@
   document.addEventListener('click', (event) => {
     const start = event.target instanceof Element ? event.target : event.target.parentElement;
     const target = start?.closest('[data-action], [data-view]');
-    if (!target) return;
+    // The backdrop owns the close action, but must not intercept clicks inside the modal.
+    if (!target || (target.classList.contains('modal-backdrop') && event.target !== target)) return;
     event.preventDefault();
     if (target.dataset.view) {
       app.view = target.dataset.view;
@@ -649,7 +650,6 @@
     }
     const action = target.dataset.action;
     if (action === 'close-modal') {
-      if (target.classList.contains('modal-backdrop') && event.target !== target) return;
       closeModal();
     } else if (action === 'confirm-action') {
       const callback = app.confirmation;
