@@ -468,24 +468,28 @@
     const totalShippingCents = state.shipments
       .filter(isActive)
       .reduce((sum, shipment) => sum + Number(shipment.shippingCostCents || 0), 0);
-    let expectedIncomeCents = 0;
+    let expectedRefundCents = 0;
+    let expectedRebateCents = 0;
     for (const allocation of state.shipmentItems.filter(isActive)) {
       const shipment = shipmentById(state, allocation.shipmentId);
       const item = itemById(state, allocation.reportItemId);
       if (!shipment || !item) continue;
-      expectedIncomeCents += amountForQuantity(item.expectedRefundCents, item.quantity, allocation.quantity);
-      expectedIncomeCents += amountForQuantity(item.expectedRebateCents, item.quantity, allocation.quantity);
+      expectedRefundCents += amountForQuantity(item.expectedRefundCents, item.quantity, allocation.quantity);
+      expectedRebateCents += amountForQuantity(item.expectedRebateCents, item.quantity, allocation.quantity);
     }
+    const expectedIncomeCents = expectedRefundCents + expectedRebateCents;
     const returnedCents = state.settlements
       .filter((settlement) => isActive(settlement) && shipmentById(state, settlement.shipmentId))
       .reduce((sum, settlement) => sum + Number(settlement.amountCents || 0), 0);
-    const outstandingCents = Math.max(expectedIncomeCents - returnedCents, 0);
-    const profitCents = outstandingCents + returnedCents - totalPurchaseCents;
+    const outstandingCents = Math.max(expectedRefundCents - returnedCents, 0);
+    const profitCents = outstandingCents + returnedCents - totalPurchaseCents + expectedRebateCents;
     const pureProfitCents = profitCents - totalShippingCents;
     return {
       totalPurchaseCents,
       totalShippingCents,
       expectedIncomeCents,
+      expectedRefundCents,
+      expectedRebateCents,
       outstandingCents,
       returnedCents,
       profitCents,

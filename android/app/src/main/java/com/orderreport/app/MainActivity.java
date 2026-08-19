@@ -4,10 +4,13 @@ import android.app.Activity;
 import android.content.ActivityNotFoundException;
 import android.content.Context;
 import android.content.Intent;
+import android.graphics.Insets;
+import android.os.Build;
 import android.os.Bundle;
 import android.print.PrintAttributes;
 import android.print.PrintManager;
 import android.view.Window;
+import android.view.WindowInsets;
 import android.webkit.JavascriptInterface;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
@@ -27,6 +30,9 @@ public final class MainActivity extends Activity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         requestWindowFeature(Window.FEATURE_NO_TITLE);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            getWindow().setDecorFitsSystemWindows(true);
+        }
 
         webView = new WebView(this);
         WebSettings settings = webView.getSettings();
@@ -42,6 +48,20 @@ public final class MainActivity extends Activity {
         webView.addJavascriptInterface(new PrintBridge(), "AndroidPrint");
         webView.addJavascriptInterface(new AndroidBridge(), "AndroidBridge");
         webView.setBackgroundColor(0xFFF5F3EE);
+        webView.setOnApplyWindowInsetsListener((view, insets) -> {
+            final int top;
+            final int bottom;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                Insets systemBars = insets.getInsets(WindowInsets.Type.systemBars());
+                top = systemBars.top;
+                bottom = systemBars.bottom;
+            } else {
+                top = insets.getSystemWindowInsetTop();
+                bottom = insets.getSystemWindowInsetBottom();
+            }
+            view.setPadding(0, top, 0, bottom);
+            return insets;
+        });
         webView.loadUrl("file:///android_asset/index.html");
         setContentView(webView);
     }
