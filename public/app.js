@@ -14,6 +14,8 @@
     syncError: '',
     syncPromise: null,
     modal: null,
+    confirmation: null,
+    printText: '',
   };
 
   const $ = (selector, root = document) => root.querySelector(selector);
@@ -101,13 +103,21 @@
     }), { quantity: 0, actualPaymentCents: 0, expectedRefundCents: 0, expectedRebateCents: 0 });
   }
   function reportSearchText(report) {
-    return [report.occurredAt, report.originalMessage, ...reportItems(report.id).map((item) => item.productName)].join(' ').toLowerCase();
+    return [report.occurredAt, report.originalMessage, ...reportItems(report.id).flatMap((item) => [item.productName, item.note])].join(' ').toLowerCase();
   }
   function shipmentViews() {
     return app.state.shipments.filter(Domain.isActive).map((shipment) => Domain.shipmentView(app.state, shipment));
   }
   function shipmentSearchText(view) {
-    return [view.shipment.trackingNumber, view.shipment.shippedAt, view.shipment.note, ...view.items.map((item) => item.productName)].join(' ').toLowerCase();
+    return [view.shipment.trackingNumber, view.shipment.shippedAt, view.shipment.note, ...view.items.flatMap((item) => [item.productName, item.productNote])].join(' ').toLowerCase();
+  }
+
+  function productLabel(item) {
+    return `${item.productName}${item.note ? `（${item.note}）` : ''}`;
+  }
+
+  function shipmentItemLabel(item) {
+    return `${item.productName}${item.productNote ? `（${item.productNote}）` : ''} ×${item.quantity}`;
   }
 
   function dispatch(type, payload) {
@@ -196,11 +206,19 @@
 
   function openModal(title, body, wide = false) {
     app.modal = true;
+    app.confirmation = null;
     $('#modal-root').innerHTML = `<div class="modal-backdrop" data-action="close-modal"><section class="modal ${wide ? 'wide' : ''}" role="dialog" aria-modal="true" aria-label="${esc(title)}"><div class="modal-heading"><h2>${esc(title)}</h2><button class="close-button" type="button" data-action="close-modal" aria-label="关闭">×</button></div><div class="modal-body">${body}</div></section></div>`;
+  }
+
+  function confirmAction(title, message, callback) {
+    openModal(title, `<div class="confirm-dialog"><div class="confirm-icon">!</div><p>${esc(message)}</p><div class="form-actions"><button class="button button-quiet" type="button" data-action="close-modal">取消</button><button class="button button-danger" type="button" data-action="confirm-action">确认</button></div></div>`);
+    app.confirmation = callback;
   }
 
   function closeModal() {
     app.modal = null;
+    app.confirmation = null;
+    app.printText = '';
     $('#modal-root').innerHTML = '';
   }
 
@@ -238,7 +256,7 @@
     return rows.map((report) => {
       const items = reportItems(report.id);
       const total = reportTotals(report.id);
-      return `<tr><td class="number">${esc(dateText(report.occurredAt))}</td><td><strong>${esc(items.map((item) => item.productName).join('、'))}</strong><div class="muted small">${items.length} 个商品行 · ${total.quantity} 件</div></td><td class="money">${money(total.actualPaymentCents)}</td><td class="money">${money(total.expectedRefundCents)}</td><td class="money">${money(total.expectedRebateCents)}</td><td>${esc(report.originalMessage || '-')}</td><td><div class="inline-actions"><button class="link-button" data-action="edit-report" data-id="${esc(report.id)}">编辑</button><button class="link-button danger" data-action="void-report" data-id="${esc(report.id)}">作废</button></div></td></tr>`;
+      return `<tr><td class="number">${esc(dateText(report.occurredAt))}</td><td><strong>${esc(items.map(productLabel).join('、'))}</strong><div class="muted small">${items.length} 个商品行 · ${total.quantity} 件</div></td><td class="money">${money(total.actualPaymentCents)}</td><td class="money">${money(total.expectedRefundCents)}</td><td class="money">${money(total.expectedRebateCents)}</td><td>${esc(report.originalMessage || '-')}</td><td><div class="inline-actions"><button class="link-button" data-action="edit-report" data-id="${esc(report.id)}">编辑</button><button class="link-button danger" data-action="void-report" data-id="${esc(report.id)}">作废</button></div></td></tr>`;
     }).join('');
   }
 
@@ -256,7 +274,7 @@
       const shipment = view.shipment;
       const quantity = view.items.reduce((sum, item) => sum + item.quantity, 0);
       const settlementDetails = view.settlements.length ? `<div class="settlement-list">${view.settlements.map((settlement) => `<div class="settlement-entry"><span>${esc(dateText(settlement.settledAt))} · ${money(settlement.amountCents)}</span><span><button class="link-button button-small" data-action="edit-settlement" data-shipment-id="${esc(shipment.id)}" data-id="${esc(settlement.id)}">编辑</button><button class="link-button danger button-small" data-action="void-settlement" data-id="${esc(settlement.id)}">撤销</button></span></div>`).join('')}</div>` : '<span class="tag tag-orange">待返款</span>';
-      return `<tr><td class="number">${esc(dateText(shipment.shippedAt))}</td><td><strong>${esc(shipment.trackingNumber)}</strong><div class="muted small">${quantity} 件</div></td><td>${esc(view.items.map((item) => `${item.productName} ×${item.quantity}`).join('、'))}</td><td class="money">${money(shipment.shippingCostCents)}</td><td class="money">${money(view.expectedRefundCents + view.expectedRebateCents)}</td><td class="money">${money(view.returnedCents)}</td><td>${settlementDetails}</td><td><div class="inline-actions"><button class="link-button" data-action="add-settlement" data-id="${esc(shipment.id)}">记返款</button><button class="link-button" data-action="edit-shipment" data-id="${esc(shipment.id)}">编辑</button><button class="link-button danger" data-action="void-shipment" data-id="${esc(shipment.id)}">作废</button></div></td></tr>`;
+      return `<tr><td class="number">${esc(dateText(shipment.shippedAt))}</td><td><strong>${esc(shipment.trackingNumber)}</strong><div class="muted small">${quantity} 件</div></td><td>${esc(view.items.map(shipmentItemLabel).join('、'))}</td><td class="money">${money(shipment.shippingCostCents)}</td><td class="money">${money(view.expectedRefundCents + view.expectedRebateCents)}</td><td class="money">${money(view.returnedCents)}</td><td>${settlementDetails}</td><td><div class="inline-actions"><button class="link-button" data-action="print-shipment" data-id="${esc(shipment.id)}">打印单子</button><button class="link-button" data-action="add-settlement" data-id="${esc(shipment.id)}">记返款</button><button class="link-button" data-action="edit-shipment" data-id="${esc(shipment.id)}">编辑</button><button class="link-button danger" data-action="void-shipment" data-id="${esc(shipment.id)}">作废</button></div></td></tr>`;
     }).join('');
   }
 
@@ -316,12 +334,12 @@
 
   function reportEditor(reportId) {
     const report = reportId ? app.state.reports.find((row) => row.id === reportId) : null;
-    const items = report ? reportItems(report.id) : [{ id: '', productName: '', quantity: 1, actualPaymentCents: 0, expectedRefundCents: 0, expectedRebateCents: 0 }];
-    openModal(report ? '编辑报单' : '新增报单', `<form data-form="report"><div class="form-grid"><div class="field"><label>报单时间</label><input class="input" name="occurredAt" type="datetime-local" required value="${esc(dateInputValue(report?.occurredAt))}"></div><div class="field"><label>商品总行数</label><input class="input" value="${items.length}" disabled></div><div class="field full"><label>原消息文本</label><textarea class="textarea" name="originalMessage" placeholder="粘贴原始报单消息">${esc(report?.originalMessage || '')}</textarea></div></div><div class="modal-section"><div class="modal-section-heading"><h3>商品明细</h3><button class="button button-small button-quiet" type="button" data-action="add-report-item">添加商品行</button></div><div class="table-wrap"><table class="editor-table"><thead><tr><th>物品名称</th><th>数量</th><th>实际付款</th><th>预计返款</th><th>预计返利</th><th></th></tr></thead><tbody id="report-items-editor">${items.map(reportItemEditorRow).join('')}</tbody></table></div></div><div class="form-actions"><button class="button button-quiet" type="button" data-action="close-modal">取消</button><button class="button" type="submit">保存报单</button></div><input type="hidden" name="id" value="${esc(report?.id || '')}"></form>`, true);
+    const items = report ? reportItems(report.id) : [{ id: '', productName: '', note: '', quantity: 1, actualPaymentCents: 0, expectedRefundCents: 0, expectedRebateCents: 0 }];
+    openModal(report ? '编辑报单' : '新增报单', `<form data-form="report"><div class="form-grid"><div class="field"><label>报单时间</label><input class="input" name="occurredAt" type="datetime-local" required value="${esc(dateInputValue(report?.occurredAt))}"></div><div class="field"><label>商品总行数</label><input class="input" value="${items.length}" disabled></div><div class="field full"><label>原消息文本</label><textarea class="textarea" name="originalMessage" placeholder="粘贴原始报单消息">${esc(report?.originalMessage || '')}</textarea></div></div><div class="modal-section"><div class="modal-section-heading"><h3>商品明细</h3><button class="button button-small button-quiet" type="button" data-action="add-report-item">添加商品行</button></div><div class="table-wrap"><table class="editor-table"><thead><tr><th>物品名称</th><th>备注</th><th>数量</th><th>实际付款</th><th>预计返款</th><th>预计返利</th><th></th></tr></thead><tbody id="report-items-editor">${items.map(reportItemEditorRow).join('')}</tbody></table></div></div><div class="form-actions"><button class="button button-quiet" type="button" data-action="close-modal">取消</button><button class="button" type="submit">保存报单</button></div><input type="hidden" name="id" value="${esc(report?.id || '')}"></form>`, true);
   }
 
   function reportItemEditorRow(item) {
-    return `<tr class="report-item-editor" data-item-id="${esc(item.id || '')}"><td><input class="input product-input" data-field="productName" value="${esc(item.productName)}" placeholder="商品名称" required></td><td><input class="input" data-field="quantity" type="number" min="1" step="1" value="${esc(item.quantity)}" required></td><td><input class="input" data-field="actualPaymentCents" inputmode="decimal" value="${esc(valueMoney(item.actualPaymentCents))}" required></td><td><input class="input" data-field="expectedRefundCents" inputmode="decimal" value="${esc(valueMoney(item.expectedRefundCents))}" required></td><td><input class="input" data-field="expectedRebateCents" inputmode="decimal" value="${esc(valueMoney(item.expectedRebateCents))}" required></td><td><button class="link-button danger" type="button" data-action="remove-report-item">移除</button></td></tr>`;
+    return `<tr class="report-item-editor" data-item-id="${esc(item.id || '')}"><td data-label="物品名称"><input class="input product-input" data-field="productName" value="${esc(item.productName)}" placeholder="商品名称" required></td><td data-label="备注"><input class="input" data-field="note" value="${esc(item.note || '')}" placeholder="可选"></td><td data-label="数量"><input class="input" data-field="quantity" type="number" min="1" step="1" value="${esc(item.quantity)}" required></td><td data-label="实际付款"><input class="input" data-field="actualPaymentCents" inputmode="decimal" value="${esc(valueMoney(item.actualPaymentCents))}" required></td><td data-label="预计返款"><input class="input" data-field="expectedRefundCents" inputmode="decimal" value="${esc(valueMoney(item.expectedRefundCents))}" required></td><td data-label="预计返利"><input class="input" data-field="expectedRebateCents" inputmode="decimal" value="${esc(valueMoney(item.expectedRebateCents))}" required></td><td data-label="操作"><button class="link-button danger" type="button" data-action="remove-report-item">移除</button></td></tr>`;
   }
 
   function collectReportForm(form) {
@@ -329,6 +347,7 @@
     const items = $$('.report-item-editor', form).map((row) => ({
       id: row.dataset.itemId || Domain.makeId('item'),
       productName: $('[data-field="productName"]', row).value.trim(),
+      note: $('[data-field="note"]', row).value.trim(),
       quantity: Number($('[data-field="quantity"]', row).value),
       actualPaymentCents: parseMoneyInput($('[data-field="actualPaymentCents"]', row).value, '实际付款'),
       expectedRefundCents: parseMoneyInput($('[data-field="expectedRefundCents"]', row).value, '预计返款'),
@@ -349,7 +368,7 @@
   }
 
   function shipmentItemEditorRow(item, options) {
-    return `<tr class="shipment-item-editor"><td><select class="select" data-field="productName" required><option value="">选择商品</option>${options}</select></td><td><input class="input" data-field="quantity" type="number" min="1" step="1" value="${esc(item.quantity || 1)}" required></td><td><button class="link-button danger" type="button" data-action="remove-shipment-item">移除</button></td></tr>`.replace(`<option value="${esc(item.productName)}">`, `<option value="${esc(item.productName)}" selected>`);
+    return `<tr class="shipment-item-editor"><td data-label="商品"><select class="select" data-field="productName" required><option value="">选择商品</option>${options}</select></td><td data-label="数量"><input class="input" data-field="quantity" type="number" min="1" step="1" value="${esc(item.quantity || 1)}" required></td><td data-label="操作"><button class="link-button danger" type="button" data-action="remove-shipment-item">移除</button></td></tr>`.replace(`<option value="${esc(item.productName)}">`, `<option value="${esc(item.productName)}" selected>`);
   }
 
   function collectShipmentForm(form) {
@@ -396,6 +415,58 @@
       : valueMoney(0);
   }
 
+  function shipmentSlipText(view) {
+    const grouped = new Map();
+    for (const item of view.items) {
+      const key = `${item.productName}\u0000${item.productNote || ''}`;
+      const current = grouped.get(key) || { productName: item.productName, productNote: item.productNote || '', quantity: 0 };
+      current.quantity += Number(item.quantity || 0);
+      grouped.set(key, current);
+    }
+    return [`快递单号：${view.shipment.trackingNumber}`, ...[...grouped.values()].map((item) => `${item.productName} *${item.quantity}${item.productNote ? `（${item.productNote}）` : ''}`)].join('\n');
+  }
+
+  function printShipment(shipmentId) {
+    const view = shipmentViews().find((item) => item.shipment.id === shipmentId);
+    if (!view) {
+      toast('快递不存在', true);
+      return;
+    }
+    app.printText = shipmentSlipText(view);
+    openModal('打印单子', `<pre class="print-preview">${esc(app.printText)}</pre><div class="print-actions"><button class="button button-quiet" type="button" data-action="copy-slip">复制内容</button><button class="button" type="button" data-action="print-slip">打印</button></div>`);
+  }
+
+  function copySlip() {
+    const text = app.printText;
+    if (!text) return;
+    const fallback = () => {
+      const textarea = document.createElement('textarea');
+      textarea.value = text;
+      textarea.setAttribute('readonly', '');
+      textarea.style.cssText = 'position:fixed;left:-9999px;top:0;opacity:0';
+      document.body.appendChild(textarea);
+      textarea.select();
+      let copied = false;
+      try { copied = document.execCommand('copy'); } catch {}
+      textarea.remove();
+      toast(copied ? '单子内容已复制' : '复制失败，请长按选择文字', !copied);
+    };
+    if (navigator.clipboard?.writeText && window.isSecureContext) {
+      navigator.clipboard.writeText(text).then(() => toast('单子内容已复制')).catch(fallback);
+    } else fallback();
+  }
+
+  function printSlip() {
+    if (window.AndroidPrint && typeof window.AndroidPrint.print === 'function') {
+      try {
+        window.AndroidPrint.print();
+        return;
+      } catch {}
+    }
+    if (typeof window.print === 'function') window.print();
+    else toast('当前环境不支持打印，请先复制单子内容', true);
+  }
+
   function localExport() {
     const blob = new Blob([JSON.stringify({ exportedAt: new Date().toISOString(), state: app.state, queue: app.queue }, null, 2)], { type: 'application/json' });
     const link = document.createElement('a');
@@ -418,8 +489,10 @@
   }
 
   document.addEventListener('click', (event) => {
-    const target = event.target.closest('[data-action], [data-view]');
+    const start = event.target instanceof Element ? event.target : event.target.parentElement;
+    const target = start?.closest('[data-action], [data-view]');
     if (!target) return;
+    event.preventDefault();
     if (target.dataset.view) {
       app.view = target.dataset.view;
       app.search = '';
@@ -430,6 +503,10 @@
     if (action === 'close-modal') {
       if (target.classList.contains('modal-backdrop') && event.target !== target) return;
       closeModal();
+    } else if (action === 'confirm-action') {
+      const callback = app.confirmation;
+      closeModal();
+      if (callback) callback();
     } else if (action === 'sync') {
       sync();
     } else if (action === 'open-settings') {
@@ -439,21 +516,24 @@
     } else if (action === 'new-report') reportEditor();
     else if (action === 'edit-report') reportEditor(target.dataset.id);
     else if (action === 'void-report') {
-      if (confirm('确定作废这笔报单？未使用的库存会一并退出。')) dispatch('report.void', { id: target.dataset.id });
+      confirmAction('作废报单', '确定作废这笔报单吗？未使用的库存会一并退出。', () => dispatch('report.void', { id: target.dataset.id }));
     } else if (action === 'new-shipment') shipmentEditor();
     else if (action === 'edit-shipment') shipmentEditor(target.dataset.id);
+    else if (action === 'print-shipment') printShipment(target.dataset.id);
     else if (action === 'void-shipment') {
-      if (confirm('确定作废这笔快递？商品会退回可用仓库，已登记返款也不再计入统计。')) dispatch('shipment.void', { id: target.dataset.id });
+      confirmAction('作废快递', '确定作废这笔快递吗？商品会退回可用仓库，已登记返款也不再计入统计。', () => dispatch('shipment.void', { id: target.dataset.id }));
     } else if (action === 'add-settlement') settlementEditor(target.dataset.id);
     else if (action === 'edit-settlement') settlementEditor(target.dataset.shipmentId, target.dataset.id);
     else if (action === 'void-settlement') {
-      if (confirm('确定撤销这笔实际返款？')) dispatch('settlement.void', { id: target.dataset.id });
+      confirmAction('撤销实际返款', '确定撤销这笔实际返款吗？', () => dispatch('settlement.void', { id: target.dataset.id }));
     } else if (action === 'new-refund') refundEditor('', target.dataset.id || '');
     else if (action === 'edit-refund') refundEditor(target.dataset.id);
     else if (action === 'void-refund') {
-      if (confirm('确定撤销这笔退款？商品会回到可用仓库。')) dispatch('refund.void', { id: target.dataset.id });
-    } else if (action === 'add-report-item') {
-      $('#report-items-editor').insertAdjacentHTML('beforeend', reportItemEditorRow({ id: '', productName: '', quantity: 1, actualPaymentCents: 0, expectedRefundCents: 0, expectedRebateCents: 0 }));
+      confirmAction('撤销退款', '确定撤销这笔退款吗？商品会回到可用仓库。', () => dispatch('refund.void', { id: target.dataset.id }));
+    } else if (action === 'copy-slip') copySlip();
+    else if (action === 'print-slip') printSlip();
+    else if (action === 'add-report-item') {
+      $('#report-items-editor').insertAdjacentHTML('beforeend', reportItemEditorRow({ id: '', productName: '', note: '', quantity: 1, actualPaymentCents: 0, expectedRefundCents: 0, expectedRebateCents: 0 }));
     } else if (action === 'remove-report-item') {
       const rows = $$('.report-item-editor');
       if (rows.length > 1) target.closest('tr').remove(); else toast('至少保留一个商品行', true);

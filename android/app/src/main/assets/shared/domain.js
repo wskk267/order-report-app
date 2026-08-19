@@ -33,6 +33,9 @@
       else if (!Array.isArray(state[key])) state[key] = [];
     }
     state.schemaVersion = SCHEMA_VERSION;
+    for (const item of state.reportItems) {
+      if (typeof item.note !== 'string') item.note = '';
+    }
     for (const refund of state.refunds) {
       const item = state.reportItems.find((row) => row.id === refund.reportItemId);
       if (item) refund.amountCents = amountForQuantity(item.actualPaymentCents, item.quantity, refund.quantity);
@@ -197,6 +200,7 @@
     return {
       id: item.id || idFactory('item'),
       productName,
+      note: text(item.note, '物品备注', false),
       quantity,
       actualPaymentCents: parseMoney(item.actualPaymentCents ?? 0, `${productName} 实际付款`),
       expectedRefundCents: parseMoney(item.expectedRefundCents ?? 0, `${productName} 预计返款`),
@@ -498,6 +502,7 @@
         return {
           ...allocation,
           productName: source?.productName || '已删除商品',
+          productNote: source?.note || '',
           expectedRefundCents: source ? amountForQuantity(source.expectedRefundCents, source.quantity, allocation.quantity) : 0,
           expectedRebateCents: source ? amountForQuantity(source.expectedRebateCents, source.quantity, allocation.quantity) : 0,
           actualPaymentCents: source ? amountForQuantity(source.actualPaymentCents, source.quantity, allocation.quantity) : 0,

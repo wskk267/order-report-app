@@ -25,7 +25,16 @@
 html, body { margin: 0; min-height: 100%; background: var(--canvas); }
 body { min-width: 320px; }
 button, input, textarea, select { font: inherit; }
-button { cursor: pointer; }
+button {
+  cursor: pointer;
+  -webkit-appearance: none;
+  -webkit-tap-highlight-color: transparent;
+  appearance: none;
+  touch-action: manipulation;
+  user-select: none;
+}
+button:focus-visible, [data-action]:focus-visible, [data-view]:focus-visible { outline: 3px solid rgba(35, 107, 82, .25); outline-offset: 2px; }
+button:active { transform: translateY(1px); }
 
 .app-shell { min-height: 100vh; }
 .topbar {
@@ -41,6 +50,7 @@ button { cursor: pointer; }
   z-index: 5;
 }
 .brand, .top-actions, .toolbar, .toolbar-group, .form-actions, .inline-actions, .stat-label { align-items: center; display: flex; }
+.inline-actions { flex-wrap: wrap; gap: 7px; }
 .brand { gap: 10px; font-size: 17px; font-weight: 700; letter-spacing: 0; }
 .brand-mark {
   align-items: center;
@@ -84,6 +94,7 @@ h3 { font-size: 15px; }
   font-weight: 700;
   min-height: 38px;
   padding: 0 15px;
+  transition: background .15s ease, border-color .15s ease, filter .15s ease, transform .08s ease;
 }
 .button:hover { filter: brightness(.94); }
 .button:disabled { cursor: not-allowed; opacity: .55; }
@@ -91,8 +102,23 @@ h3 { font-size: 15px; }
 .button-quiet:hover { background: var(--surface-muted); filter: none; }
 .button-danger { background: transparent; border-color: var(--red); color: var(--red); }
 .button-small { font-size: 12px; min-height: 30px; padding: 0 10px; }
-.link-button { background: none; border: 0; color: var(--green); padding: 3px 5px; }
-.link-button.danger { color: var(--red); }
+.link-button {
+  align-items: center;
+  background: var(--surface-muted);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  color: var(--ink);
+  display: inline-flex;
+  font-size: 12px;
+  font-weight: 700;
+  justify-content: center;
+  min-height: 36px;
+  padding: 0 10px;
+  transition: background .15s ease, border-color .15s ease, color .15s ease, transform .08s ease;
+}
+.link-button:hover { background: #e5e2d9; border-color: #c7c4ba; }
+.link-button.danger { background: var(--red-soft); border-color: #e4b8b6; color: var(--red); }
+.link-button.danger:hover { background: #f0cecc; border-color: #d9a09d; }
 .toolbar { flex-wrap: wrap; gap: 10px; justify-content: space-between; margin-bottom: 16px; }
 .toolbar-group { flex-wrap: wrap; gap: 8px; }
 .search-input { min-width: 230px; }
@@ -192,6 +218,14 @@ tr:last-child td { border-bottom: 0; }
 .danger-box { background: var(--red-soft); border-radius: 6px; color: #833633; font-size: 12px; line-height: 1.6; padding: 12px 14px; }
 .checkbox-row { align-items: center; display: flex; gap: 8px; }
 .checkbox-row input { accent-color: var(--green); }
+.confirm-dialog { padding: 8px 2px 2px; text-align: center; }
+.confirm-dialog p { color: var(--ink); font-size: 15px; line-height: 1.7; }
+.confirm-icon { align-items: center; background: var(--orange-soft); border: 1px solid #e8c59f; border-radius: 50%; color: var(--orange); display: flex; font-size: 20px; font-weight: 800; height: 44px; justify-content: center; margin: 0 auto 14px; width: 44px; }
+.confirm-dialog .form-actions { justify-content: stretch; }
+.confirm-dialog .form-actions .button { flex: 1; }
+.print-preview { background: #fff; border: 1px dashed var(--line); border-radius: 7px; color: var(--ink); font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 18px; line-height: 1.8; margin: 0; min-height: 170px; overflow-wrap: anywhere; padding: 18px; white-space: pre-wrap; }
+.print-actions { display: flex; gap: 9px; justify-content: flex-end; margin-top: 18px; }
+.print-actions .button { min-width: 100px; }
 
 @media (max-width: 980px) {
   .layout { grid-template-columns: 1fr; }
@@ -317,7 +351,8 @@ tr:last-child td { border-bottom: 0; }
     text-align: center;
   }
   .mobile-table td[colspan]::before { display: none; }
-  .mobile-table .inline-actions { justify-content: flex-end; }
+  .mobile-table .inline-actions { display: grid; gap: 8px; grid-template-columns: repeat(2, minmax(0, 1fr)); justify-content: stretch; width: 100%; }
+  .mobile-table .inline-actions .link-button { min-height: 40px; width: 100%; }
   .report-table td:nth-child(1)::before { content: "时间"; }
   .report-table td:nth-child(2)::before { content: "商品"; }
   .report-table td:nth-child(3)::before { content: "实际付款"; }
@@ -349,6 +384,8 @@ tr:last-child td { border-bottom: 0; }
   .refund-table td:nth-child(7)::before { content: "操作"; }
   .settlement-list { min-width: 0; text-align: right; }
   .settlement-entry { white-space: normal; }
+  .settlement-entry > span:last-child { display: flex; gap: 6px; }
+  .settlement-entry .link-button { min-height: 36px; }
   .editor-table tr.report-item-editor,
   .editor-table tr.shipment-item-editor {
     border: 1px solid var(--line);
@@ -360,6 +397,7 @@ tr:last-child td { border-bottom: 0; }
     padding: 10px;
   }
   .editor-table td { border: 0; display: block; padding: 0; }
+  .editor-table td[data-label]::before { color: var(--muted); content: attr(data-label); display: block; font-size: 11px; font-weight: 700; margin-bottom: 5px; }
   .editor-table .input,
   .editor-table .select { min-width: 0; width: 100%; }
   .editor-table .report-item-editor td:first-child,
@@ -371,4 +409,19 @@ tr:last-child td { border-bottom: 0; }
   .input, .select, .textarea { font-size: 16px; }
   .modal-body { overflow-x: hidden; }
   #toast-root { bottom: calc(78px + env(safe-area-inset-bottom)); right: 12px; }
+  .print-preview { font-size: 17px; min-height: 200px; padding: 16px; }
+  .print-actions { flex-direction: column-reverse; }
+  .print-actions .button { width: 100%; }
+}
+
+@media print {
+  @page { margin: 14mm; }
+  body { background: #fff; }
+  body > .app-shell, body > #toast-root { display: none !important; }
+  #modal-root { display: block !important; }
+  #modal-root .modal-backdrop { align-items: initial; background: #fff; display: block; padding: 0; position: static; }
+  #modal-root .modal { box-shadow: none; max-height: none; max-width: none; overflow: visible; width: auto; }
+  #modal-root .modal-heading, #modal-root .print-actions { display: none !important; }
+  #modal-root .modal-body { padding: 0; }
+  #modal-root .print-preview { border: 0; font-size: 18pt; min-height: 0; padding: 0; }
 }

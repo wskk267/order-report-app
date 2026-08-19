@@ -93,3 +93,19 @@ test('shipment update releases its old FIFO allocation before reassigning', () =
   assert.equal(Domain.inventoryLots(state).find((row) => row.reportItemId === 'r1_item'), undefined);
   assert.equal(Domain.inventoryLots(state).find((row) => row.reportItemId === 'r2_item').availableQuantity, 1);
 });
+
+test('shipment view carries item notes for printed slips', () => {
+  let state = Domain.emptyState();
+  const idFactory = ids();
+  state = Domain.applyOperation(state, operation('report.create', {
+    report: { id: 'r_note', occurredAt: '2026-08-01', originalMessage: '' },
+    items: [{ id: 'r_note_item', productName: '商品D', note: '红色', quantity: 2, actualPaymentCents: 1000, expectedRefundCents: 100, expectedRebateCents: 0 }],
+  }), { idFactory }).state;
+  state = Domain.applyOperation(state, operation('shipment.create', {
+    shipment: { id: 's_note', trackingNumber: 'TRACK-NOTE', shippingCostCents: 0, shippedAt: '2026-08-02' },
+    items: [{ productName: '商品D', quantity: 1 }],
+  }), { idFactory }).state;
+  const view = Domain.shipmentView(state, state.shipments[0]);
+  assert.equal(view.items[0].productName, '商品D');
+  assert.equal(view.items[0].productNote, '红色');
+});
