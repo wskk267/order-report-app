@@ -10,6 +10,7 @@
     settings: { ...DEFAULT_SETTINGS },
     clientId: '',
     view: 'dashboard',
+    viewHistory: [],
     search: '',
     syncError: '',
     syncPromise: null,
@@ -162,6 +163,28 @@
 
   function shipmentItemLabel(item) {
     return `${item.productName}${item.productNote ? `（${item.productNote}）` : ''} ×${item.quantity}`;
+  }
+
+  function navigateView(view) {
+    if (!view || view === app.view) return;
+    app.viewHistory.push(app.view);
+    if (app.viewHistory.length > 20) app.viewHistory.shift();
+    app.view = view;
+    app.search = '';
+    render();
+  }
+
+  function navigateBack() {
+    if (app.modal) {
+      closeModal();
+      return true;
+    }
+    const previous = app.viewHistory.pop();
+    if (!previous) return false;
+    app.view = previous;
+    app.search = '';
+    render();
+    return true;
   }
 
   function dispatch(type, payload) {
@@ -358,9 +381,9 @@
     const shipments = shipmentViews().sort((a, b) => String(b.shipment.shippedAt).localeCompare(String(a.shipment.shippedAt))).slice(0, 5);
     return `${pageHeading('Workspace', '总览', '收入、库存和返款状态', '<button class="button" data-action="new-report">新增报单</button>')}
       <section class="card-grid">
-        <article class="stat-card accent-green"><div class="stat-label">累计商品付款</div><div class="stat-value money">${money(summary.totalPurchaseCents)}</div><div class="stat-foot">仅统计已发商品，未发库存不计入</div></article>
+        <article class="stat-card accent-green"><div class="stat-label">累计商品付款</div><div class="stat-value money">${money(summary.totalPurchaseCents)}</div><div class="stat-foot">已扣除退款商品</div></article>
         <article class="stat-card accent-orange"><div class="stat-label">累计快递费用</div><div class="stat-value money">${money(summary.totalShippingCents)}</div><div class="stat-foot">全部有效快递</div></article>
-        <article class="stat-card accent-blue"><div class="stat-label">预计未返款</div><div class="stat-value money">${money(summary.outstandingCents)}</div><div class="stat-foot">预计返款 ${money(summary.expectedRefundCents)} · 预计返利 ${money(summary.expectedRebateCents)}</div></article>
+        <article class="stat-card accent-blue"><div class="stat-label">预计未返款</div><div class="stat-value money">${money(summary.outstandingCents)}</div><div class="stat-foot">预计返款 ${money(summary.expectedRefundCents)} · 预计返利 ${money(summary.expectedRebateCents)}<span class="stat-subfoot">有 ${money(summary.pendingShipmentPurchaseCents)} 商品待发货</span></div></article>
         <article class="stat-card accent-green"><div class="stat-label">已返款</div><div class="stat-value money">${money(summary.returnedCents)}</div><div class="stat-foot">利润含预计返利 ${money(summary.profitCents)}</div></article>
         <article class="stat-card accent-orange"><div class="stat-label">纯利润</div><div class="stat-value money">${money(summary.pureProfitCents)}</div><div class="stat-foot">利润减快递费用</div></article>
         <article class="stat-card accent-blue"><div class="stat-label">利率</div><div class="stat-value">${percent(summary.rate)}</div><div class="stat-foot">纯利润 / 累计商品付款</div></article>
@@ -395,8 +418,14 @@
     return rows.map((view) => {
       const shipment = view.shipment;
       const quantity = view.items.reduce((sum, item) => sum + item.quantity, 0);
-      const settlementDetails = view.settlements.length ? `<div class="settlement-list">${view.settlements.map((settlement) => `<div class="settlement-entry"><span>${esc(dateText(settlement.settledAt))} · ${money(settlement.amountCents)}</span><span><button class="link-button button-small" data-action="edit-settlement" data-shipment-id="${esc(shipment.id)}" data-id="${esc(settlement.id)}">编辑</button><button class="link-button danger button-small" data-action="void-settlement" data-id="${esc(settlement.id)}">撤销</button></span></div>`).join('')}</div>` : '<span class="tag tag-orange">待返款</span>';
-      return `<tr><td class="number">${esc(dateText(shipment.shippedAt))}</td><td><strong>${esc(shipment.trackingNumber)}</strong><div class="muted small">${quantity} 件</div></td><td>${esc(view.items.map(shipmentItemLabel).join('、'))}</td><td class="money">${money(shipment.shippingCostCents)}</td><td class="money">${money(view.expectedRefundCents)}</td><td class="money">${money(view.expectedRebateCents)}</td><td class="money">${money(view.returnedCents)}</td><td>${settlementDetails}</td><td><div class="inline-actions"><button class="link-button" data-action="print-shipment" data-id="${esc(shipment.id)}">打印单子</button><button class="link-button" data-action="add-settlement" data-id="${esc(shipment.id)}">记返款</button><button class="link-button" data-action="edit-shipment" data-id="${esc(shipment.id)}">编辑</button><button class="link-button danger" data-action="void-shipment" data-id="${esc(shipment.id)}">作废</button></div></td></tr>`;
+      const settlementList = view.settlements.length ? `<div class="settlement-list">${view.settlements.map((settlement) => `<div class="settlement-entry"><span>${esc(dateText(settlement.settledAt))} · ${money(settlement.amountCents)}</span>${view.closed ? '' : `<span><button class="link-button button-small" data-action="edit-settlement" data-shipment-id="${esc(shipment.id)}" data-id="${esc(settlement.id)}">编辑</button><button class="link-button danger button-small" data-action="void-settlement" data-id="${esc(settlement.id)}">撤销</button></span>`}</div>`).join('')}</div>` : '';
+      const settlementDetails = `${settlementList}${view.closed ? '<span class="tag tag-green">已结单</span>' : settlementList ? '' : '<span class="tag tag-orange">待返款</span>'}`;
+      const settlementAction = view.closed
+        ? `<button class="link-button" data-action="reopen-shipment" data-id="${esc(shipment.id)}">撤销结单</button>`
+        : `<button class="link-button" data-action="close-shipment" data-id="${esc(shipment.id)}">结单</button>`;
+      const addSettlementAction = view.closed ? '' : `<button class="link-button" data-action="add-settlement" data-id="${esc(shipment.id)}">记返款</button>`;
+      const shipmentEditActions = view.closed ? '' : `<button class="link-button" data-action="edit-shipment" data-id="${esc(shipment.id)}">编辑</button><button class="link-button danger" data-action="void-shipment" data-id="${esc(shipment.id)}">作废</button>`;
+      return `<tr><td class="number">${esc(dateText(shipment.shippedAt))}</td><td><strong>${esc(shipment.trackingNumber)}</strong><div class="muted small">${quantity} 件</div></td><td>${esc(view.items.map(shipmentItemLabel).join('、'))}</td><td class="money">${money(shipment.shippingCostCents)}</td><td class="money">${money(view.expectedRefundCents)}</td><td class="money">${money(view.expectedRebateCents)}</td><td class="money">${money(view.returnedCents)}</td><td>${settlementDetails}</td><td><div class="inline-actions"><button class="link-button" data-action="print-shipment" data-id="${esc(shipment.id)}">打印单子</button>${addSettlementAction}${settlementAction}${shipmentEditActions}</div></td></tr>`;
     }).join('');
   }
 
@@ -436,7 +465,7 @@
     const connection = connectionStatus();
     return `${pageHeading('Configuration', '设置', '服务器同步和本机数据', '')}
       <section class="settings-stack">
-        <article class="panel"><div class="panel-heading"><h2>同步连接</h2><span class="status-pill ${connection.kind}">${connection.label}</span></div><div class="panel-body padded"><form data-form="settings"><div class="form-grid"><div class="field full"><label for="api-base">服务器地址</label><input class="input" id="api-base" name="apiBase" value="${esc(app.settings.apiBase)}" placeholder="https://order.example.com"><div class="field-help">填写 HTTPS 反向代理地址，例如 https://order.galaxy-kw.me。</div></div><div class="field full"><label for="sync-token">同步令牌</label><input class="input" id="sync-token" name="token" type="password" value="${esc(app.settings.token)}" autocomplete="off" placeholder="从服务器 runtime/sync-token 读取"><div class="field-help">令牌只保存于本机 WebView，不会写入业务 Git 仓库。</div></div></div><div class="sync-actions"><button class="button" type="submit">保存</button><button class="button button-quiet" type="button" data-action="sync-test">测试</button><button class="button button-quiet" type="button" data-action="sync-upload">上传</button><button class="button button-quiet" type="button" data-action="sync-download">下载</button></div></form></div></article>
+        <article class="panel"><div class="panel-heading"><h2>同步连接</h2><span class="status-pill ${connection.kind}">${connection.label}</span></div><div class="panel-body padded"><form data-form="settings"><div class="form-grid"><div class="field full"><label for="api-base">服务器地址</label><input class="input" id="api-base" name="apiBase" value="${esc(app.settings.apiBase)}" placeholder="https://order.example.com"><div class="field-help">填写 HTTPS 反向代理地址，例如 https://order.example.com。</div></div><div class="field full"><label for="sync-token">同步令牌</label><input class="input" id="sync-token" name="token" type="password" value="${esc(app.settings.token)}" autocomplete="off" placeholder="从服务器 runtime/sync-token 读取"><div class="field-help">令牌只保存于本机 WebView，不会写入业务 Git 仓库。</div></div></div><div class="sync-actions"><button class="button" type="submit">保存</button><button class="button button-quiet" type="button" data-action="sync-test">测试</button><button class="button button-quiet" type="button" data-action="sync-upload">上传</button><button class="button button-quiet" type="button" data-action="sync-download">下载</button></div></form></div></article>
         <article class="panel"><div class="panel-heading"><h2>同步状态</h2><span class="muted small">${queueSummary()}</span></div><div class="panel-body padded"><div class="sync-counts"><div><span>待上传操作</span><strong>${pending}</strong></div><div><span>失败待处理</span><strong>${failed}</strong></div></div>${app.syncError ? `<div class="danger-box">${esc(app.syncError)}</div>` : '<div class="info-box">待上传数量只代表尚未送到服务器的本地操作，不代表本机业务数据条数。成功同步后为 0 是正常状态。</div>'}${failed ? `<div class="warning-box" style="margin-top:12px">失败操作不会自动重复提交。请修正数据后重新编辑保存，或使用“下载”放弃这些本机改动。</div>` : ''}</div></article>
         <article class="panel"><div class="panel-heading"><h2>数据备份</h2></div><div class="panel-body padded"><div class="backup-actions"><button class="button button-quiet" data-action="export-local">导出本机数据</button><button class="button button-quiet" data-action="export-server">导出服务器数据</button></div><p class="field-help" style="margin-top:12px">导出内容可能包含完整业务数据。手机端会打开系统保存位置，也可以复制 JSON 内容。</p></div></article>
       </section>`;
@@ -643,9 +672,7 @@
     if (!target || (target.classList.contains('modal-backdrop') && event.target !== target)) return;
     event.preventDefault();
     if (target.dataset.view) {
-      app.view = target.dataset.view;
-      app.search = '';
-      render();
+      navigateView(target.dataset.view);
       return;
     }
     const action = target.dataset.action;
@@ -664,9 +691,7 @@
     } else if (action === 'sync-download') {
       downloadData();
     } else if (action === 'open-settings') {
-      app.view = 'settings';
-      app.search = '';
-      render();
+      navigateView('settings');
     } else if (action === 'new-report') reportEditor();
     else if (action === 'edit-report') reportEditor(target.dataset.id);
     else if (action === 'void-report') {
@@ -676,6 +701,10 @@
     else if (action === 'print-shipment') printShipment(target.dataset.id);
     else if (action === 'void-shipment') {
       confirmAction('作废快递', '确定作废这笔快递吗？商品会退回可用仓库，已登记返款也不再计入统计。', () => dispatch('shipment.void', { id: target.dataset.id }));
+    } else if (action === 'close-shipment') {
+      confirmAction('结单快递', '确定这笔快递的返款已经完成吗？结单后不会继续显示待返款；如需补录或修改返款，可先撤销结单。', () => dispatch('shipment.close', { id: target.dataset.id }));
+    } else if (action === 'reopen-shipment') {
+      confirmAction('撤销结单', '撤销后可以继续登记或修改这笔快递的返款，是否继续？', () => dispatch('shipment.reopen', { id: target.dataset.id }));
     } else if (action === 'add-settlement') settlementEditor(target.dataset.id);
     else if (action === 'edit-settlement') settlementEditor(target.dataset.shipmentId, target.dataset.id);
     else if (action === 'void-settlement') {
@@ -745,6 +774,7 @@
   });
 
   window.onNativeExportResult = (success, message) => toast(message || (success ? '文件已保存' : '文件保存失败'), !success);
+  window.handleNativeBack = navigateBack;
   localStorageRead();
   render();
   if ('serviceWorker' in navigator && /^https?:$/.test(location.protocol)) navigator.serviceWorker.register('sw.js').catch(() => {});

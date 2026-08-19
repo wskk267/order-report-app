@@ -151,6 +151,7 @@ h3 { font-size: 15px; }
 .stat-label { color: var(--muted); font-size: 12px; justify-content: space-between; }
 .stat-value { font-size: 25px; font-weight: 750; letter-spacing: 0; margin-top: 15px; }
 .stat-foot { color: var(--muted); font-size: 12px; margin-top: 7px; }
+.stat-subfoot { display: block; margin-top: 4px; }
 .accent-green { border-top: 3px solid var(--green); }
 .accent-orange { border-top: 3px solid var(--orange); }
 .accent-blue { border-top: 3px solid var(--blue); }

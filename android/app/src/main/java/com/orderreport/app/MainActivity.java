@@ -11,6 +11,7 @@ import android.print.PrintAttributes;
 import android.print.PrintManager;
 import android.view.Window;
 import android.view.WindowInsets;
+import android.window.OnBackInvokedDispatcher;
 import android.webkit.JavascriptInterface;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
@@ -64,6 +65,11 @@ public final class MainActivity extends Activity {
         });
         webView.loadUrl("file:///android_asset/index.html");
         setContentView(webView);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            getOnBackInvokedDispatcher().registerOnBackInvokedCallback(
+                    OnBackInvokedDispatcher.PRIORITY_DEFAULT,
+                    this::handleBackPressed);
+        }
     }
 
     private final class PrintBridge {
@@ -129,7 +135,20 @@ public final class MainActivity extends Activity {
 
     @Override
     public void onBackPressed() {
-        if (webView != null && webView.canGoBack()) webView.goBack();
-        else super.onBackPressed();
+        handleBackPressed();
+    }
+
+    private void handleBackPressed() {
+        if (webView == null) {
+            super.onBackPressed();
+            return;
+        }
+        webView.evaluateJavascript(
+                "(window.handleNativeBack && window.handleNativeBack()) === true",
+                result -> {
+                    if ("true".equals(result)) return;
+                    if (webView.canGoBack()) webView.goBack();
+                    else MainActivity.super.onBackPressed();
+                });
     }
 }

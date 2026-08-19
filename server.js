@@ -143,8 +143,23 @@ const server = http.createServer((request, response) => {
   });
 });
 
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+async function runDailyBackup() {
+  try {
+    const result = await store.backupDaily();
+    if (result.created) console.log(`daily database backup created: ${result.path}`);
+  } catch (error) {
+    // A backup problem should be visible, but must not keep the service offline.
+    console.error(`daily database backup failed: ${error.message}`);
+  }
+}
+
 async function start() {
   await store.ready;
+  await runDailyBackup();
+  const backupTimer = setInterval(runDailyBackup, DAY_MS);
+  backupTimer.unref();
   server.listen(config.port, config.host, () => {
     console.log(`order-report-app listening on http://${config.host}:${config.port}`);
     console.log(`sync token file: ${config.tokenPath}`);

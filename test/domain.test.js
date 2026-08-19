@@ -43,14 +43,15 @@ test('FIFO allocation separates expected refund and rebate in stats', () => {
   assert.equal(Domain.inventoryLots(state).find((row) => row.reportItemId === 'r_old_item'), undefined);
   assert.equal(Domain.inventoryLots(state).find((row) => row.reportItemId === 'r_new_item').availableQuantity, 1);
   const summary = Domain.stats(state);
-  assert.equal(summary.totalPurchaseCents, 2200);
-  assert.equal(summary.expectedIncomeCents, 510);
-  assert.equal(summary.expectedRefundCents, 400);
-  assert.equal(summary.expectedRebateCents, 110);
-  assert.equal(summary.outstandingCents, 400);
-  assert.equal(summary.profitCents, -1690);
-  assert.equal(summary.pureProfitCents, -1810);
-  assert.equal(summary.rate, -1810 / 2200);
+  assert.equal(summary.totalPurchaseCents, 2800);
+  assert.equal(summary.expectedIncomeCents, 640);
+  assert.equal(summary.expectedRefundCents, 500);
+  assert.equal(summary.expectedRebateCents, 140);
+  assert.equal(summary.outstandingCents, 500);
+  assert.equal(summary.profitCents, -2160);
+  assert.equal(summary.pureProfitCents, -2280);
+  assert.equal(summary.pendingShipmentPurchaseCents, 600);
+  assert.equal(summary.rate, -2280 / 2800);
 });
 
 test('partial settlements and refunds update derived values', () => {
@@ -68,16 +69,45 @@ test('partial settlements and refunds update derived values', () => {
     refund: { id: 'refund1', reportItemId: 'r1_item', quantity: 1, amountCents: 1, refundedAt: '2026-08-04' },
   }), { idFactory, now: '2026-08-04T11:00' }).state;
   const summary = Domain.stats(state);
-  assert.equal(summary.totalPurchaseCents, 2000);
-  assert.equal(summary.expectedIncomeCents, 600);
-  assert.equal(summary.expectedRefundCents, 400);
-  assert.equal(summary.expectedRebateCents, 200);
+  assert.equal(summary.totalPurchaseCents, 3000);
+  assert.equal(summary.expectedIncomeCents, 900);
+  assert.equal(summary.expectedRefundCents, 600);
+  assert.equal(summary.expectedRebateCents, 300);
   assert.equal(summary.returnedCents, 300);
-  assert.equal(summary.outstandingCents, 100);
-  assert.equal(summary.profitCents, -1400);
-  assert.equal(summary.pureProfitCents, -1700);
+  assert.equal(summary.outstandingCents, 300);
+  assert.equal(summary.profitCents, -2100);
+  assert.equal(summary.pureProfitCents, -2400);
+  assert.equal(summary.pendingShipmentPurchaseCents, 1000);
   assert.equal(Domain.inventoryLots(state)[0].availableQuantity, 1);
   assert.equal(state.refunds[0].amountCents, 1000);
+});
+
+test('closed shipments keep their settlements and reopen before changes', () => {
+  let state = Domain.emptyState();
+  const idFactory = ids();
+  state = Domain.applyOperation(state, operation('report.create', reportPayload('r_close', '商品E', 1, 1000, 120, 30)), { idFactory }).state;
+  state = Domain.applyOperation(state, operation('shipment.create', {
+    shipment: { id: 's_close', trackingNumber: 'TRACK-CLOSE', shippingCostCents: 100, shippedAt: '2026-08-02' },
+    items: [{ productName: '商品E', quantity: 1 }],
+  }), { idFactory }).state;
+  state = Domain.applyOperation(state, operation('settlement.create', {
+    settlement: { id: 'settle_close', shipmentId: 's_close', amountCents: 120, settledAt: '2026-08-03' },
+  }), { idFactory }).state;
+  state = Domain.applyOperation(state, operation('shipment.close', { id: 's_close' }), { idFactory, now: '2026-08-04T11:00' }).state;
+  const closedView = Domain.shipmentView(state, state.shipments[0]);
+  assert.equal(closedView.closed, true);
+  assert.equal(closedView.returnedCents, 120);
+  assert.throws(() => Domain.applyOperation(state, operation('settlement.update', {
+    settlement: { id: 'settle_close', amountCents: 130, settledAt: '2026-08-05' },
+  }), { idFactory }), /已结单/);
+
+  state = Domain.applyOperation(state, operation('shipment.reopen', { id: 's_close' }), { idFactory, now: '2026-08-05T11:00' }).state;
+  state = Domain.applyOperation(state, operation('settlement.update', {
+    settlement: { id: 'settle_close', amountCents: 130, settledAt: '2026-08-05' },
+  }), { idFactory }).state;
+  const reopenedView = Domain.shipmentView(state, state.shipments[0]);
+  assert.equal(reopenedView.closed, false);
+  assert.equal(reopenedView.returnedCents, 130);
 });
 
 test('shipment update releases its old FIFO allocation before reassigning', () => {

@@ -30,3 +30,22 @@ test('store applies sync operations idempotently', async () => {
   assert.equal(snapshot.state.reports.length, 1);
   fs.rmSync(directory, { recursive: true, force: true });
 });
+
+test('store creates one protected sqlite backup per day without overwriting it', async () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'order-report-backup-'));
+  const store = new Store(path.join(directory, 'data.sqlite3'));
+  await store.ready;
+
+  const first = await store.backupDaily('2026-08-19');
+  assert.equal(first.created, true);
+  assert.equal(first.path, path.join(directory, 'backups', 'order-report-2026-08-19.sqlite3'));
+  assert.equal(fs.statSync(path.join(directory, 'backups')).mode & 0o777, 0o700);
+  assert.equal(fs.statSync(first.path).mode & 0o777, 0o600);
+  const original = fs.readFileSync(first.path);
+
+  const second = await store.backupDaily('2026-08-19');
+  assert.equal(second.created, false);
+  assert.deepEqual(fs.readFileSync(second.path), original);
+
+  fs.rmSync(directory, { recursive: true, force: true });
+});

@@ -36,6 +36,9 @@
     for (const item of state.reportItems) {
       if (typeof item.note !== 'string') item.note = '';
     }
+    for (const shipment of state.shipments) {
+      if (typeof shipment.closedAt !== 'string' || !shipment.closedAt) shipment.closedAt = null;
+    }
     for (const refund of state.refunds) {
       const item = state.reportItems.find((row) => row.id === refund.reportItemId);
       if (item) refund.amountCents = amountForQuantity(item.actualPaymentCents, item.quantity, refund.quantity);
@@ -106,6 +109,10 @@
 
   function shipmentById(state, id) {
     return state.shipments.find((row) => row.id === id && isActive(row));
+  }
+
+  function ensureShipmentOpen(shipment) {
+    if (shipment?.closedAt) throw new Error('快递已结单，请先撤销结单');
   }
 
   function reportItems(state, reportId) {
@@ -283,6 +290,7 @@
       shippingCostCents: parseMoney(input.shippingCostCents ?? 0, '快递价格'),
       shippedAt: text(input.shippedAt, '发出时间'),
       note: text(input.note, '备注', false),
+      closedAt: input.closedAt || null,
       createdAt: input.createdAt || now,
       updatedAt: now,
       status: 'active',
@@ -309,6 +317,7 @@
     const input = payload.shipment || payload;
     const shipment = shipmentById(state, input.id);
     if (!shipment) throw new Error('快递不存在');
+    ensureShipmentOpen(shipment);
     const next = normalizeShipment({ ...shipment, ...input, id: shipment.id, createdAt: shipment.createdAt }, idFactory, now);
     const allocations = allocateFifo(state, payload.items, { excludeShipmentId: shipment.id });
     Object.assign(shipment, next, { updatedAt: now });
@@ -327,10 +336,28 @@
   function voidShipment(state, payload, now) {
     const shipment = shipmentById(state, payload.id);
     if (!shipment) throw new Error('快递不存在');
+    ensureShipmentOpen(shipment);
     shipment.status = 'void';
     shipment.updatedAt = now;
     for (const item of state.shipmentItems.filter((row) => row.shipmentId === shipment.id)) item.status = 'void';
     return { state, result: { id: shipment.id } };
+  }
+
+  function closeShipment(state, payload, now) {
+    const shipment = shipmentById(state, payload.id);
+    if (!shipment) throw new Error('快递不存在');
+    ensureShipmentOpen(shipment);
+    shipment.closedAt = now;
+    shipment.updatedAt = now;
+    return { state, result: { id: shipment.id, closedAt: shipment.closedAt } };
+  }
+
+  function reopenShipment(state, payload, now) {
+    const shipment = shipmentById(state, payload.id);
+    if (!shipment) throw new Error('快递不存在');
+    shipment.closedAt = null;
+    shipment.updatedAt = now;
+    return { state, result: { id: shipment.id, closedAt: null } };
   }
 
   function refreshRefundAmounts(state, reportItemId) {
@@ -343,7 +370,9 @@
 
   function addSettlement(state, payload, now, idFactory) {
     const input = payload.settlement || payload;
-    if (!shipmentById(state, input.shipmentId)) throw new Error('快递不存在');
+    const shipment = shipmentById(state, input.shipmentId);
+    if (!shipment) throw new Error('快递不存在');
+    ensureShipmentOpen(shipment);
     const amountCents = parseMoney(input.amountCents ?? 0, '实际返款金额');
     if (amountCents < 1) throw new Error('实际返款金额必须大于 0');
     const settlement = {
@@ -364,7 +393,9 @@
     const input = payload.settlement || payload;
     const settlement = state.settlements.find((row) => row.id === input.id && isActive(row));
     if (!settlement) throw new Error('返款记录不存在');
-    if (!shipmentById(state, settlement.shipmentId)) throw new Error('关联快递不存在');
+    const shipment = shipmentById(state, settlement.shipmentId);
+    if (!shipment) throw new Error('关联快递不存在');
+    ensureShipmentOpen(shipment);
     Object.assign(settlement, {
       amountCents: parseMoney(input.amountCents ?? settlement.amountCents, '实际返款金额'),
       settledAt: text(input.settledAt, '返款时间'),
@@ -378,6 +409,9 @@
   function voidSettlement(state, payload, now) {
     const settlement = state.settlements.find((row) => row.id === payload.id && isActive(row));
     if (!settlement) throw new Error('返款记录不存在');
+    const shipment = shipmentById(state, settlement.shipmentId);
+    if (!shipment) throw new Error('关联快递不存在');
+    ensureShipmentOpen(shipment);
     settlement.status = 'void';
     settlement.updatedAt = now;
     return { state, result: { id: settlement.id } };
@@ -447,6 +481,8 @@
       case 'shipment.create': return addShipment(state, operation.payload || {}, now, idFactory);
       case 'shipment.update': return updateShipment(state, operation.payload || {}, now, idFactory);
       case 'shipment.void': return voidShipment(state, operation.payload || {}, now);
+      case 'shipment.close': return closeShipment(state, operation.payload || {}, now);
+      case 'shipment.reopen': return reopenShipment(state, operation.payload || {}, now);
       case 'settlement.create': return addSettlement(state, operation.payload || {}, now, idFactory);
       case 'settlement.update': return updateSettlement(state, operation.payload || {}, now);
       case 'settlement.void': return voidSettlement(state, operation.payload || {}, now);
@@ -462,20 +498,21 @@
     const totalPurchaseCents = state.reportItems
       .filter((item) => isActive(item) && activeReports.has(item.reportId))
       .reduce((sum, item) => {
-        const shipped = shipmentItemQuantity(state, item.id);
-        return sum + amountForQuantity(item.actualPaymentCents, item.quantity, shipped);
+        const refunded = refundQuantity(state, item.id);
+        return sum + amountForQuantity(item.actualPaymentCents, item.quantity, item.quantity - refunded);
       }, 0);
+    const pendingShipmentPurchaseCents = inventoryLots(state)
+      .reduce((sum, lot) => sum + amountForQuantity(lot.actualPaymentCents, lot.quantity, lot.availableQuantity), 0);
     const totalShippingCents = state.shipments
       .filter(isActive)
       .reduce((sum, shipment) => sum + Number(shipment.shippingCostCents || 0), 0);
     let expectedRefundCents = 0;
     let expectedRebateCents = 0;
-    for (const allocation of state.shipmentItems.filter(isActive)) {
-      const shipment = shipmentById(state, allocation.shipmentId);
-      const item = itemById(state, allocation.reportItemId);
-      if (!shipment || !item) continue;
-      expectedRefundCents += amountForQuantity(item.expectedRefundCents, item.quantity, allocation.quantity);
-      expectedRebateCents += amountForQuantity(item.expectedRebateCents, item.quantity, allocation.quantity);
+    for (const item of state.reportItems.filter((row) => isActive(row) && activeReports.has(row.reportId))) {
+      const refunded = refundQuantity(state, item.id);
+      const remaining = item.quantity - refunded;
+      expectedRefundCents += amountForQuantity(item.expectedRefundCents, item.quantity, remaining);
+      expectedRebateCents += amountForQuantity(item.expectedRebateCents, item.quantity, remaining);
     }
     const expectedIncomeCents = expectedRefundCents + expectedRebateCents;
     const returnedCents = state.settlements
@@ -486,6 +523,7 @@
     const pureProfitCents = profitCents - totalShippingCents;
     return {
       totalPurchaseCents,
+      pendingShipmentPurchaseCents,
       totalShippingCents,
       expectedIncomeCents,
       expectedRefundCents,
@@ -515,6 +553,8 @@
     const settlements = state.settlements.filter((row) => row.shipmentId === shipment.id && isActive(row));
     return {
       shipment,
+      closed: Boolean(shipment.closedAt),
+      closedAt: shipment.closedAt || null,
       items,
       settlements,
       expectedRefundCents: items.reduce((sum, item) => sum + item.expectedRefundCents, 0),
