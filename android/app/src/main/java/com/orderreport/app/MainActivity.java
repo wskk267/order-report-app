@@ -1,7 +1,9 @@
 package com.orderreport.app;
 
 import android.app.Activity;
+import android.content.ActivityNotFoundException;
 import android.content.Context;
+import android.content.Intent;
 import android.os.Bundle;
 import android.print.PrintAttributes;
 import android.print.PrintManager;
@@ -11,8 +13,15 @@ import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 
+import org.json.JSONObject;
+
+import java.io.OutputStream;
+import java.nio.charset.StandardCharsets;
+
 public final class MainActivity extends Activity {
+    private static final int EXPORT_REQUEST_CODE = 4201;
     private WebView webView;
+    private String pendingExportContent;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -31,6 +40,7 @@ public final class MainActivity extends Activity {
         settings.setMixedContentMode(WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE);
         webView.setWebViewClient(new WebViewClient());
         webView.addJavascriptInterface(new PrintBridge(), "AndroidPrint");
+        webView.addJavascriptInterface(new AndroidBridge(), "AndroidBridge");
         webView.setBackgroundColor(0xFFF5F3EE);
         webView.loadUrl("file:///android_asset/index.html");
         setContentView(webView);
@@ -47,6 +57,54 @@ public final class MainActivity extends Activity {
                         .build());
             });
         }
+    }
+
+    private final class AndroidBridge {
+        @JavascriptInterface
+        public void saveText(String fileName, String content) {
+            runOnUiThread(() -> {
+                pendingExportContent = content;
+                Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+                intent.addCategory(Intent.CATEGORY_OPENABLE);
+                intent.setType("application/json");
+                intent.putExtra(Intent.EXTRA_TITLE, fileName);
+                try {
+                    startActivityForResult(intent, EXPORT_REQUEST_CODE);
+                } catch (ActivityNotFoundException error) {
+                    clearPendingExport();
+                    notifyExport(false, "手机没有可用的文件保存程序");
+                }
+            });
+        }
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode != EXPORT_REQUEST_CODE) return;
+        String content = pendingExportContent;
+        clearPendingExport();
+        if (resultCode != RESULT_OK || data == null || data.getData() == null) {
+            notifyExport(false, "已取消保存");
+            return;
+        }
+        try (OutputStream output = getContentResolver().openOutputStream(data.getData())) {
+            if (output == null) throw new IllegalStateException("无法打开保存位置");
+            output.write(content.getBytes(StandardCharsets.UTF_8));
+            notifyExport(true, "文件已保存");
+        } catch (Exception error) {
+            notifyExport(false, "保存失败：" + error.getMessage());
+        }
+    }
+
+    private void clearPendingExport() {
+        pendingExportContent = null;
+    }
+
+    private void notifyExport(boolean success, String message) {
+        if (webView == null) return;
+        String script = "window.onNativeExportResult && window.onNativeExportResult(" + success + "," + JSONObject.quote(message) + ");";
+        webView.post(() -> webView.evaluateJavascript(script, null));
     }
 
     @Override

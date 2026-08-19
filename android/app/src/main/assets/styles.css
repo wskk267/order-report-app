@@ -213,6 +213,16 @@ tr:last-child td { border-bottom: 0; }
 .toast { background: var(--ink); border-radius: 6px; box-shadow: var(--shadow); color: #fff; font-size: 13px; max-width: min(380px, calc(100vw - 30px)); padding: 11px 14px; }
 #toast-root { bottom: 18px; display: grid; gap: 8px; position: fixed; right: 18px; z-index: 30; }
 .settings-stack { display: grid; gap: 16px; max-width: 680px; }
+.sync-actions, .backup-actions, .export-actions { display: flex; flex-wrap: wrap; gap: 9px; }
+.sync-actions { justify-content: flex-end; margin-top: 20px; }
+.sync-actions .button { min-width: 82px; }
+.sync-counts { display: grid; gap: 10px; grid-template-columns: repeat(2, minmax(0, 1fr)); margin-bottom: 16px; }
+.sync-counts > div { background: var(--surface-muted); border: 1px solid var(--line); border-radius: 7px; padding: 12px 14px; }
+.sync-counts span { color: var(--muted); display: block; font-size: 12px; }
+.sync-counts strong { display: block; font-size: 24px; margin-top: 8px; }
+.export-preview { background: #fff; border: 1px solid var(--line); border-radius: 7px; color: var(--ink); font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 12px; line-height: 1.5; min-height: min(58vh, 520px); padding: 13px; resize: none; width: 100%; }
+.export-actions { justify-content: flex-end; margin-top: 14px; }
+.export-actions .button { min-width: 110px; }
 .info-box { background: var(--blue-soft); border-radius: 6px; color: #28536c; font-size: 12px; line-height: 1.6; padding: 12px 14px; }
 .warning-box { background: var(--orange-soft); border-radius: 6px; color: #7d481b; font-size: 12px; line-height: 1.6; padding: 12px 14px; }
 .danger-box { background: var(--red-soft); border-radius: 6px; color: #833633; font-size: 12px; line-height: 1.6; padding: 12px 14px; }
@@ -412,6 +422,11 @@ tr:last-child td { border-bottom: 0; }
   .print-preview { font-size: 17px; min-height: 200px; padding: 16px; }
   .print-actions { flex-direction: column-reverse; }
   .print-actions .button { width: 100%; }
+  .sync-actions, .backup-actions, .export-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .sync-actions .button, .backup-actions .button, .export-actions .button { min-width: 0; width: 100%; }
+  .sync-counts { gap: 8px; }
+  .sync-counts > div { padding: 11px 12px; }
+  .export-preview { min-height: 58vh; }
 }
 
 @media print {

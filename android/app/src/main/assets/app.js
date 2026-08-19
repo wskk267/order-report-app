@@ -16,6 +16,8 @@
     modal: null,
     confirmation: null,
     printText: '',
+    exportText: '',
+    exportFilename: '',
   };
 
   const $ = (selector, root = document) => root.querySelector(selector);
@@ -82,6 +84,48 @@
     element.textContent = label;
   }
 
+  function queueCounts() {
+    return app.queue.reduce((counts, operation) => {
+      if (operation.syncError) counts.failed += 1;
+      else counts.pending += 1;
+      return counts;
+    }, { pending: 0, failed: 0 });
+  }
+
+  function pendingOperations() {
+    return app.queue.filter((operation) => !operation.syncError);
+  }
+
+  function queueSummary() {
+    const { pending, failed } = queueCounts();
+    if (pending && failed) return `待上传 ${pending} 条 · 失败 ${failed} 条`;
+    if (pending) return `待上传 ${pending} 条`;
+    if (failed) return `失败 ${failed} 条`;
+    return '无待上传操作';
+  }
+
+  function refreshSyncStatus() {
+    const { pending, failed } = queueCounts();
+    if (!app.settings.apiBase) {
+      setSyncStatus('local', pending ? `仅本地 · ${pending}` : failed ? `本地失败 · ${failed}` : '仅本地');
+    } else if (app.syncError) {
+      setSyncStatus('error', pending ? `离线 · ${pending}` : failed ? `失败 · ${failed}` : '离线');
+    } else if (failed) {
+      setSyncStatus('error', `失败 · ${failed}`);
+    } else if (pending) {
+      setSyncStatus('syncing', `待上传 · ${pending}`);
+    } else {
+      setSyncStatus('online', '已同步');
+    }
+  }
+
+  function connectionStatus() {
+    const { failed } = queueCounts();
+    if (!app.settings.apiBase) return { kind: 'local', label: '仅本地' };
+    if (app.syncError || failed) return { kind: 'error', label: '需处理' };
+    return { kind: 'online', label: '已配置' };
+  }
+
   function toast(message, isError = false) {
     const root = $('#toast-root');
     const element = document.createElement('div');
@@ -143,11 +187,20 @@
     }
   }
 
-  async function apiRequest(path, options = {}) {
-    const base = String(app.settings.apiBase || '').trim().replace(/\/$/, '');
+  function settingsFromForm() {
+    const form = $('form[data-form="settings"]');
+    if (!form) return { ...app.settings };
+    return {
+      apiBase: form.elements.apiBase.value.trim().replace(/\/$/, ''),
+      token: form.elements.token.value.trim(),
+    };
+  }
+
+  async function apiRequest(path, options = {}, connection = app.settings) {
+    const base = String(connection.apiBase || '').trim().replace(/\/$/, '');
     if (!base) throw new Error('尚未设置服务器地址');
     const headers = { ...(options.body ? { 'Content-Type': 'application/json' } : {}), ...(options.headers || {}) };
-    if (app.settings.token) headers['X-Sync-Token'] = app.settings.token;
+    if (connection.token) headers['X-Sync-Token'] = connection.token;
     const response = await fetch(`${base}${path}`, { ...options, headers });
     let body = null;
     try { body = await response.json(); } catch {}
@@ -155,43 +208,53 @@
     return body;
   }
 
+  async function pushPendingOperations(allowEmpty = false) {
+    const pending = pendingOperations();
+    if (!pending.length && !allowEmpty) return { pending: 0, rejected: new Map() };
+    const pushed = await apiRequest('/api/sync/push', {
+      method: 'POST',
+      body: JSON.stringify({ clientId: app.clientId, operations: pending }),
+    });
+    const rejected = new Map((pushed.rejected || []).map((item) => [item.opId, item.error]));
+    for (const operation of app.queue) {
+      if (rejected.has(operation.opId)) operation.syncError = rejected.get(operation.opId);
+    }
+    const acceptedIds = new Set(pending.filter((operation) => !rejected.has(operation.opId)).map((operation) => operation.opId));
+    app.queue = app.queue.filter((operation) => !acceptedIds.has(operation.opId));
+    app.syncError = rejected.size ? [...rejected.values()][0] : '';
+    const { failed } = queueCounts();
+    if (!rejected.size && !failed && pending.length) app.state = Domain.normalizeState(pushed.state);
+    localStorageWrite();
+    return { pending: pending.length, rejected };
+  }
+
+  async function pullServerState(replaceLocal = false) {
+    const pulled = await apiRequest('/api/sync/pull');
+    if (replaceLocal) {
+      app.state = Domain.normalizeState(pulled.state);
+      app.queue = [];
+      app.syncError = '';
+    } else if (!app.queue.length) {
+      app.state = Domain.normalizeState(pulled.state);
+      app.syncError = '';
+    }
+    localStorageWrite();
+    return pulled;
+  }
+
   async function sync() {
     if (app.syncPromise) return app.syncPromise;
     if (!app.settings.apiBase) {
-      setSyncStatus('local', app.queue.length ? `仅本地 · ${app.queue.length}` : '仅本地');
+      refreshSyncStatus();
       return;
     }
     app.syncPromise = (async () => {
       setSyncStatus('syncing', '同步中');
       try {
-        const pending = app.queue.filter((operation) => !operation.syncError);
-        if (pending.length) {
-          const pushed = await apiRequest('/api/sync/push', {
-            method: 'POST',
-            body: JSON.stringify({ clientId: app.clientId, operations: pending }),
-          });
-          const rejected = new Map((pushed.rejected || []).map((item) => [item.opId, item.error]));
-          for (const operation of app.queue) {
-            if (rejected.has(operation.opId)) operation.syncError = rejected.get(operation.opId);
-          }
-          app.queue = app.queue.filter((operation) => !pending.some((item) => item.opId === operation.opId && !rejected.has(item.opId)));
-          if (!rejected.size) {
-            app.state = Domain.normalizeState(pushed.state);
-          } else {
-            app.syncError = [...rejected.values()][0];
-          }
-          localStorageWrite();
-        } else if (!app.queue.length) {
-          const pulled = await apiRequest('/api/sync/pull');
-          app.state = Domain.normalizeState(pulled.state);
-          localStorageWrite();
-        }
-        if (app.queue.length) {
-          setSyncStatus('error', `待处理 ${app.queue.length}`);
-        } else {
-          app.syncError = '';
-          setSyncStatus('online', '已同步');
-        }
+        const { pending, failed } = queueCounts();
+        if (pending) await pushPendingOperations();
+        else if (!failed) await pullServerState();
+        refreshSyncStatus();
         render();
       } catch (error) {
         app.syncError = error.message;
@@ -202,6 +265,63 @@
       }
     })();
     return app.syncPromise;
+  }
+
+  async function testConnection() {
+    const connection = settingsFromForm();
+    try {
+      if (!connection.apiBase) throw new Error('请先填写服务器地址');
+      setSyncStatus('syncing', '测试中');
+      await apiRequest('/api/health', {}, connection);
+      await apiRequest('/api/sync/pull', {}, connection);
+      app.syncError = '';
+      setSyncStatus('online', '测试成功');
+      toast('连接和同步令牌测试成功');
+    } catch (error) {
+      app.syncError = error.message;
+      setSyncStatus('error', '测试失败');
+      toast(`连接测试失败：${error.message}`, true);
+    }
+  }
+
+  async function uploadData() {
+    try {
+      if (!app.settings.apiBase) throw new Error('请先保存服务器地址和同步令牌');
+      setSyncStatus('syncing', '上传中');
+      const result = await pushPendingOperations(true);
+      if (result.rejected.size) throw new Error([...result.rejected.values()][0]);
+      refreshSyncStatus();
+      toast(result.pending ? `已上传 ${result.pending} 条操作` : '没有待上传操作');
+    } catch (error) {
+      app.syncError = error.message;
+      refreshSyncStatus();
+      toast(`上传失败：${error.message}`, true);
+    }
+    render();
+  }
+
+  async function performDownload() {
+    try {
+      if (!app.settings.apiBase) throw new Error('请先保存服务器地址和同步令牌');
+      setSyncStatus('syncing', '下载中');
+      await pullServerState(true);
+      refreshSyncStatus();
+      toast('服务器数据已下载到本机');
+    } catch (error) {
+      app.syncError = error.message;
+      refreshSyncStatus();
+      toast(`下载失败：${error.message}`, true);
+    }
+    render();
+  }
+
+  function downloadData() {
+    const { pending, failed } = queueCounts();
+    if (pending || failed) {
+      confirmAction('覆盖本机数据', `当前有 ${pending} 条待上传、${failed} 条失败操作。下载会覆盖本机数据并清空这些操作，是否继续？`, performDownload);
+    } else {
+      performDownload();
+    }
   }
 
   function openModal(title, body, wide = false) {
@@ -219,6 +339,8 @@
     app.modal = null;
     app.confirmation = null;
     app.printText = '';
+    app.exportText = '';
+    app.exportFilename = '';
     $('#modal-root').innerHTML = '';
   }
 
@@ -310,11 +432,13 @@
   }
 
   function renderSettings() {
+    const { pending, failed } = queueCounts();
+    const connection = connectionStatus();
     return `${pageHeading('Configuration', '设置', '服务器同步和本机数据', '')}
       <section class="settings-stack">
-        <article class="panel"><div class="panel-heading"><h2>同步连接</h2><span class="status-pill ${app.settings.apiBase ? 'online' : 'local'}">${app.settings.apiBase ? '已配置' : '仅本地'}</span></div><div class="panel-body padded"><form data-form="settings"><div class="form-grid"><div class="field full"><label for="api-base">服务器地址</label><input class="input" id="api-base" name="apiBase" value="${esc(app.settings.apiBase)}" placeholder="https://order.example.com"><div class="field-help">本机服务通过 Cloudflare/frpc 对外时，填写对应 HTTPS 地址。</div></div><div class="field full"><label for="sync-token">同步令牌</label><input class="input" id="sync-token" name="token" type="password" value="${esc(app.settings.token)}" autocomplete="off" placeholder="从服务器 runtime/sync-token 读取"><div class="field-help">令牌只保存于本机 WebView，不会写入业务 Git 仓库。</div></div></div><div class="form-actions"><button class="button button-quiet" type="button" data-action="sync">测试并同步</button><button class="button" type="submit">保存连接</button></div></form></div></article>
-        <article class="panel"><div class="panel-heading"><h2>同步状态</h2><span class="muted small">待上传 ${app.queue.length} 条</span></div><div class="panel-body padded">${app.syncError ? `<div class="danger-box">${esc(app.syncError)}</div>` : '<div class="info-box">当前业务数据先保存到本机。服务器不可用时可以继续录入，恢复网络后会自动上传。</div>'}${app.queue.some((item) => item.syncError) ? `<div class="warning-box" style="margin-top:12px">有操作被服务器拒绝，请检查数据后通过重新编辑提交。当前本地数据仍会保留。</div>` : ''}</div></article>
-        <article class="panel"><div class="panel-heading"><h2>数据备份</h2></div><div class="panel-body padded"><div class="toolbar-group"><button class="button button-quiet" data-action="export-local">导出本机数据</button><button class="button button-quiet" data-action="export-server">导出服务器数据</button></div><p class="field-help" style="margin-top:12px">导出文件可能包含完整业务数据，请只保存到可信位置，不要上传到公开仓库。</p></div></article>
+        <article class="panel"><div class="panel-heading"><h2>同步连接</h2><span class="status-pill ${connection.kind}">${connection.label}</span></div><div class="panel-body padded"><form data-form="settings"><div class="form-grid"><div class="field full"><label for="api-base">服务器地址</label><input class="input" id="api-base" name="apiBase" value="${esc(app.settings.apiBase)}" placeholder="https://order.example.com"><div class="field-help">填写 HTTPS 反向代理地址，例如 https://order.galaxy-kw.me。</div></div><div class="field full"><label for="sync-token">同步令牌</label><input class="input" id="sync-token" name="token" type="password" value="${esc(app.settings.token)}" autocomplete="off" placeholder="从服务器 runtime/sync-token 读取"><div class="field-help">令牌只保存于本机 WebView，不会写入业务 Git 仓库。</div></div></div><div class="sync-actions"><button class="button" type="submit">保存</button><button class="button button-quiet" type="button" data-action="sync-test">测试</button><button class="button button-quiet" type="button" data-action="sync-upload">上传</button><button class="button button-quiet" type="button" data-action="sync-download">下载</button></div></form></div></article>
+        <article class="panel"><div class="panel-heading"><h2>同步状态</h2><span class="muted small">${queueSummary()}</span></div><div class="panel-body padded"><div class="sync-counts"><div><span>待上传操作</span><strong>${pending}</strong></div><div><span>失败待处理</span><strong>${failed}</strong></div></div>${app.syncError ? `<div class="danger-box">${esc(app.syncError)}</div>` : '<div class="info-box">待上传数量只代表尚未送到服务器的本地操作，不代表本机业务数据条数。成功同步后为 0 是正常状态。</div>'}${failed ? `<div class="warning-box" style="margin-top:12px">失败操作不会自动重复提交。请修正数据后重新编辑保存，或使用“下载”放弃这些本机改动。</div>` : ''}</div></article>
+        <article class="panel"><div class="panel-heading"><h2>数据备份</h2></div><div class="panel-body padded"><div class="backup-actions"><button class="button button-quiet" data-action="export-local">导出本机数据</button><button class="button button-quiet" data-action="export-server">导出服务器数据</button></div><p class="field-help" style="margin-top:12px">导出内容可能包含完整业务数据。手机端会打开系统保存位置，也可以复制 JSON 内容。</p></div></article>
       </section>`;
   }
 
@@ -328,8 +452,7 @@
     if (app.view === 'inventory') main.innerHTML = renderInventory();
     if (app.view === 'refunds') main.innerHTML = renderRefunds();
     if (app.view === 'settings') main.innerHTML = renderSettings();
-    if (!app.settings.apiBase) setSyncStatus('local', app.queue.length ? `仅本地 · ${app.queue.length}` : '仅本地');
-    else if (app.syncError) setSyncStatus('error', '离线保存');
+    refreshSyncStatus();
   }
 
   function reportEditor(reportId) {
@@ -439,21 +562,7 @@
   function copySlip() {
     const text = app.printText;
     if (!text) return;
-    const fallback = () => {
-      const textarea = document.createElement('textarea');
-      textarea.value = text;
-      textarea.setAttribute('readonly', '');
-      textarea.style.cssText = 'position:fixed;left:-9999px;top:0;opacity:0';
-      document.body.appendChild(textarea);
-      textarea.select();
-      let copied = false;
-      try { copied = document.execCommand('copy'); } catch {}
-      textarea.remove();
-      toast(copied ? '单子内容已复制' : '复制失败，请长按选择文字', !copied);
-    };
-    if (navigator.clipboard?.writeText && window.isSecureContext) {
-      navigator.clipboard.writeText(text).then(() => toast('单子内容已复制')).catch(fallback);
-    } else fallback();
+    copyText(text, '单子内容已复制');
   }
 
   function printSlip() {
@@ -467,24 +576,63 @@
     else toast('当前环境不支持打印，请先复制单子内容', true);
   }
 
-  function localExport() {
-    const blob = new Blob([JSON.stringify({ exportedAt: new Date().toISOString(), state: app.state, queue: app.queue }, null, 2)], { type: 'application/json' });
+  function copyText(text, successMessage) {
+    const fallback = () => {
+      const textarea = document.createElement('textarea');
+      textarea.value = text;
+      textarea.setAttribute('readonly', '');
+      textarea.style.cssText = 'position:fixed;left:-9999px;top:0;opacity:0';
+      document.body.appendChild(textarea);
+      textarea.select();
+      let copied = false;
+      try { copied = document.execCommand('copy'); } catch {}
+      textarea.remove();
+      toast(copied ? successMessage : '复制失败，请长按选择文字', !copied);
+    };
+    if (navigator.clipboard?.writeText && window.isSecureContext) {
+      navigator.clipboard.writeText(text).then(() => toast(successMessage)).catch(fallback);
+    } else fallback();
+  }
+
+  function saveExportFile() {
+    if (!app.exportText || !app.exportFilename) return;
+    if (window.AndroidBridge && typeof window.AndroidBridge.saveText === 'function') {
+      try {
+        window.AndroidBridge.saveText(app.exportFilename, app.exportText);
+        toast('已打开系统保存位置');
+        return;
+      } catch {}
+    }
+    const blob = new Blob([app.exportText], { type: 'application/json;charset=utf-8' });
     const link = document.createElement('a');
     link.href = URL.createObjectURL(blob);
-    link.download = `order-report-local-${new Date().toISOString().slice(0, 10)}.json`;
+    link.download = app.exportFilename;
+    document.body.appendChild(link);
     link.click();
-    URL.revokeObjectURL(link.href);
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+    toast('导出文件已生成');
+  }
+
+  function openExportPreview(title, filename, data) {
+    app.exportText = JSON.stringify(data, null, 2);
+    app.exportFilename = filename;
+    openModal(title, `<textarea class="export-preview" readonly aria-label="导出数据">${esc(app.exportText)}</textarea><div class="export-actions"><button class="button button-quiet" type="button" data-action="copy-export">复制 JSON</button><button class="button" type="button" data-action="save-export">保存 JSON</button></div>`);
+  }
+
+  function localExport() {
+    openExportPreview('导出本机数据', `order-report-local-${new Date().toISOString().slice(0, 10)}.json`, {
+      exportedAt: new Date().toISOString(),
+      source: 'local',
+      state: app.state,
+      queue: app.queue,
+    });
   }
 
   async function serverExport() {
     try {
       const data = await apiRequest('/api/export');
-      const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
-      const link = document.createElement('a');
-      link.href = URL.createObjectURL(blob);
-      link.download = `order-report-server-${new Date().toISOString().slice(0, 10)}.json`;
-      link.click();
-      URL.revokeObjectURL(link.href);
+      openExportPreview('导出服务器数据', `order-report-server-${new Date().toISOString().slice(0, 10)}.json`, data);
     } catch (error) { toast(error.message, true); }
   }
 
@@ -509,6 +657,12 @@
       if (callback) callback();
     } else if (action === 'sync') {
       sync();
+    } else if (action === 'sync-test') {
+      testConnection();
+    } else if (action === 'sync-upload') {
+      uploadData();
+    } else if (action === 'sync-download') {
+      downloadData();
     } else if (action === 'open-settings') {
       app.view = 'settings';
       app.search = '';
@@ -544,6 +698,8 @@
       if (rows.length > 1) target.closest('tr').remove(); else toast('至少保留一个商品行', true);
     } else if (action === 'export-local') localExport();
     else if (action === 'export-server') serverExport();
+    else if (action === 'copy-export') copyText(app.exportText, '导出数据已复制');
+    else if (action === 'save-export') saveExportFile();
   });
 
   document.addEventListener('input', (event) => {
@@ -579,17 +735,16 @@
         const payload = { refund: { id: form.elements.id.value || Domain.makeId('refund'), reportItemId: form.elements.reportItemId.value, quantity: Number(form.elements.quantity.value), refundedAt: form.elements.refundedAt.value, note: form.elements.note.value.trim() } };
         dispatch(form.elements.id.value ? 'refund.update' : 'refund.create', payload);
       } else if (form.dataset.form === 'settings') {
-        app.settings.apiBase = form.elements.apiBase.value.trim().replace(/\/$/, '');
-        app.settings.token = form.elements.token.value.trim();
+        app.settings = settingsFromForm();
         app.syncError = '';
         localStorageWrite();
         render();
         toast('连接设置已保存');
-        sync();
       }
     } catch (error) { toast(error.message, true); }
   });
 
+  window.onNativeExportResult = (success, message) => toast(message || (success ? '文件已保存' : '文件保存失败'), !success);
   localStorageRead();
   render();
   if ('serviceWorker' in navigator && /^https?:$/.test(location.protocol)) navigator.serviceWorker.register('sw.js').catch(() => {});
