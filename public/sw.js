@@ -1,4 +1,4 @@
-const CACHE_NAME = 'order-report-shell-v4';
+const CACHE_NAME = 'order-report-shell-v5';
 const SHELL = ['./', './index.html', './styles.css', './app.js', './shared/domain.js', './manifest.webmanifest'];
 
 self.addEventListener('install', (event) => {

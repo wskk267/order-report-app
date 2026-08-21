@@ -115,6 +115,12 @@
     if (shipment?.closedAt) throw new Error('快递已结单，请先撤销结单');
   }
 
+  function settlementTotal(state, shipmentId) {
+    return state.settlements
+      .filter((row) => row.shipmentId === shipmentId && isActive(row))
+      .reduce((sum, row) => sum + Number(row.amountCents || 0), 0);
+  }
+
   function reportItems(state, reportId) {
     return state.reportItems.filter((row) => row.reportId === reportId && isActive(row));
   }
@@ -242,13 +248,24 @@
     if (!incomingItems.length) throw new Error('报单至少需要一个商品');
     const existingItems = reportItems(state, report.id);
     const incomingIds = new Set(incomingItems.map((item) => item.id));
+    const occurredAt = text(input.occurredAt, '报单时间');
+    const reportHasUsedItems = existingItems.some((item) => shipmentItemQuantity(state, item.id) || refundQuantity(state, item.id));
+    if (reportHasUsedItems && occurredAt !== report.occurredAt) {
+      throw new Error('报单已有出库或退款记录，不能修改报单时间');
+    }
     for (const oldItem of existingItems) {
-      if (!incomingIds.has(oldItem.id) && (shipmentItemQuantity(state, oldItem.id) || refundQuantity(state, oldItem.id))) {
+      const used = shipmentItemQuantity(state, oldItem.id) + refundQuantity(state, oldItem.id);
+      const incoming = incomingItems.find((item) => item.id === oldItem.id);
+      if (!incomingIds.has(oldItem.id) && used) {
         throw new Error(`商品“${oldItem.productName}”已出库或退款，不能删除`);
+      }
+      if (incoming && used && ['productName', 'quantity', 'actualPaymentCents', 'expectedRefundCents', 'expectedRebateCents']
+        .some((field) => incoming[field] !== oldItem[field])) {
+        throw new Error(`商品“${oldItem.productName}”已有出库或退款记录，不能修改名称、数量或金额`);
       }
     }
     Object.assign(report, {
-      occurredAt: text(input.occurredAt, '报单时间'),
+      occurredAt,
       originalMessage: text(input.originalMessage, '原消息文本', false),
       updatedAt: now,
     });
@@ -347,6 +364,9 @@
     const shipment = shipmentById(state, payload.id);
     if (!shipment) throw new Error('快递不存在');
     ensureShipmentOpen(shipment);
+    if (settlementTotal(state, shipment.id) < 1) {
+      throw new Error('结单前请先登记实际返款金额');
+    }
     shipment.closedAt = now;
     shipment.updatedAt = now;
     return { state, result: { id: shipment.id, closedAt: shipment.closedAt } };
@@ -495,6 +515,16 @@
 
   function stats(state) {
     const activeReports = new Set(state.reports.filter(isActive).map((row) => row.id));
+    const activeShipments = new Map(state.shipments.filter(isActive).map((shipment) => [shipment.id, shipment]));
+    const closedQuantityByItem = new Map();
+    for (const allocation of state.shipmentItems.filter(isActive)) {
+      const shipment = activeShipments.get(allocation.shipmentId);
+      if (!shipment?.closedAt) continue;
+      closedQuantityByItem.set(
+        allocation.reportItemId,
+        (closedQuantityByItem.get(allocation.reportItemId) || 0) + Number(allocation.quantity || 0),
+      );
+    }
     const totalPurchaseCents = state.reportItems
       .filter((item) => isActive(item) && activeReports.has(item.reportId))
       .reduce((sum, item) => {
@@ -507,19 +537,31 @@
       .filter(isActive)
       .reduce((sum, shipment) => sum + Number(shipment.shippingCostCents || 0), 0);
     let expectedRefundCents = 0;
+    let pendingExpectedRefundCents = 0;
     let expectedRebateCents = 0;
     for (const item of state.reportItems.filter((row) => isActive(row) && activeReports.has(row.reportId))) {
       const refunded = refundQuantity(state, item.id);
       const remaining = item.quantity - refunded;
       expectedRefundCents += amountForQuantity(item.expectedRefundCents, item.quantity, remaining);
+      const closedQuantity = Math.min(remaining, closedQuantityByItem.get(item.id) || 0);
+      pendingExpectedRefundCents += amountForQuantity(item.expectedRefundCents, item.quantity, remaining - closedQuantity);
       expectedRebateCents += amountForQuantity(item.expectedRebateCents, item.quantity, remaining);
     }
     const expectedIncomeCents = expectedRefundCents + expectedRebateCents;
-    const returnedCents = state.settlements
-      .filter((settlement) => isActive(settlement) && shipmentById(state, settlement.shipmentId))
-      .reduce((sum, settlement) => sum + Number(settlement.amountCents || 0), 0);
-    const outstandingCents = Math.max(expectedRefundCents - returnedCents, 0);
-    const profitCents = outstandingCents + returnedCents - totalPurchaseCents + expectedRebateCents;
+    let returnedCents = 0;
+    let pendingReturnedCents = 0;
+    let closedActualRefundCents = 0;
+    for (const settlement of state.settlements.filter(isActive)) {
+      const shipment = activeShipments.get(settlement.shipmentId);
+      if (!shipment) continue;
+      const amount = Number(settlement.amountCents || 0);
+      returnedCents += amount;
+      if (shipment.closedAt) closedActualRefundCents += amount;
+      else pendingReturnedCents += amount;
+    }
+    const outstandingCents = Math.max(pendingExpectedRefundCents - pendingReturnedCents, 0);
+    const recognizedRefundCents = closedActualRefundCents + pendingExpectedRefundCents;
+    const profitCents = recognizedRefundCents - totalPurchaseCents + expectedRebateCents;
     const pureProfitCents = profitCents - totalShippingCents;
     return {
       totalPurchaseCents,
@@ -527,9 +569,13 @@
       totalShippingCents,
       expectedIncomeCents,
       expectedRefundCents,
+      pendingExpectedRefundCents,
       expectedRebateCents,
       outstandingCents,
       returnedCents,
+      pendingReturnedCents,
+      closedActualRefundCents,
+      recognizedRefundCents,
       profitCents,
       pureProfitCents,
       rate: totalPurchaseCents ? pureProfitCents / totalPurchaseCents : 0,
@@ -551,6 +597,7 @@
         };
       });
     const settlements = state.settlements.filter((row) => row.shipmentId === shipment.id && isActive(row));
+    const returnedCents = settlements.reduce((sum, row) => sum + Number(row.amountCents || 0), 0);
     return {
       shipment,
       closed: Boolean(shipment.closedAt),
@@ -559,7 +606,8 @@
       settlements,
       expectedRefundCents: items.reduce((sum, item) => sum + item.expectedRefundCents, 0),
       expectedRebateCents: items.reduce((sum, item) => sum + item.expectedRebateCents, 0),
-      returnedCents: settlements.reduce((sum, row) => sum + Number(row.amountCents || 0), 0),
+      returnedCents,
+      refundVarianceCents: returnedCents - items.reduce((sum, item) => sum + item.expectedRefundCents, 0),
     };
   }
 

@@ -165,6 +165,19 @@
     return `${item.productName}${item.productNote ? `（${item.productNote}）` : ''} ×${item.quantity}`;
   }
 
+  function refundDifferenceText(cents) {
+    if (!cents) return '与预计一致';
+    return cents > 0 ? `比预计多 ${money(cents)}` : `比预计少 ${money(-cents)}`;
+  }
+
+  function shipmentStatusDetails(view) {
+    if (view.closed) {
+      return `<span class="tag tag-green">已结单</span><span class="muted small">${esc(refundDifferenceText(view.refundVarianceCents))}</span>`;
+    }
+    if (view.returnedCents) return `<span class="tag tag-blue">待结单</span><span class="muted small">已收 ${money(view.returnedCents)} · ${esc(refundDifferenceText(view.refundVarianceCents))}</span>`;
+    return '<span class="tag tag-orange">待返款</span>';
+  }
+
   function navigateView(view) {
     if (!view || view === app.view) return;
     app.viewHistory.push(app.view);
@@ -383,8 +396,9 @@
       <section class="card-grid">
         <article class="stat-card accent-green"><div class="stat-label">累计商品付款</div><div class="stat-value money">${money(summary.totalPurchaseCents)}</div><div class="stat-foot">已扣除退款商品</div></article>
         <article class="stat-card accent-orange"><div class="stat-label">累计快递费用</div><div class="stat-value money">${money(summary.totalShippingCents)}</div><div class="stat-foot">全部有效快递</div></article>
-        <article class="stat-card accent-blue"><div class="stat-label">预计未返款</div><div class="stat-value money">${money(summary.outstandingCents)}</div><div class="stat-foot">预计返款 ${money(summary.expectedRefundCents)} · 预计返利 ${money(summary.expectedRebateCents)}<span class="stat-subfoot">有 ${money(summary.pendingShipmentPurchaseCents)} 商品待发货</span></div></article>
-        <article class="stat-card accent-green"><div class="stat-label">已返款</div><div class="stat-value money">${money(summary.returnedCents)}</div><div class="stat-foot">利润含预计返利 ${money(summary.profitCents)}</div></article>
+        <article class="stat-card accent-blue"><div class="stat-label">预计未返款</div><div class="stat-value money">${money(summary.outstandingCents)}</div><div class="stat-foot">原始预计返款 ${money(summary.expectedRefundCents)} · 预计返利 ${money(summary.expectedRebateCents)}<span class="stat-subfoot">有 ${money(summary.pendingShipmentPurchaseCents)} 商品待发货</span><span class="stat-subfoot">未结单预计 ${money(summary.pendingExpectedRefundCents)} · 已结单实际 ${money(summary.closedActualRefundCents)}</span></div></article>
+        <article class="stat-card accent-green"><div class="stat-label">已返款</div><div class="stat-value money">${money(summary.returnedCents)}</div><div class="stat-foot">已结单实际 ${money(summary.closedActualRefundCents)} · 未结单已收 ${money(summary.pendingReturnedCents)}</div></article>
+        <article class="stat-card accent-green"><div class="stat-label">利润</div><div class="stat-value money">${money(summary.profitCents)}</div><div class="stat-foot">已结单实际 + 未结单预计 - 商品付款 + 预计返利</div></article>
         <article class="stat-card accent-orange"><div class="stat-label">纯利润</div><div class="stat-value money">${money(summary.pureProfitCents)}</div><div class="stat-foot">利润减快递费用</div></article>
         <article class="stat-card accent-blue"><div class="stat-label">利率</div><div class="stat-value">${percent(summary.rate)}</div><div class="stat-foot">纯利润 / 累计商品付款</div></article>
       </section>
@@ -419,20 +433,20 @@
       const shipment = view.shipment;
       const quantity = view.items.reduce((sum, item) => sum + item.quantity, 0);
       const settlementList = view.settlements.length ? `<div class="settlement-list">${view.settlements.map((settlement) => `<div class="settlement-entry"><span>${esc(dateText(settlement.settledAt))} · ${money(settlement.amountCents)}</span>${view.closed ? '' : `<span><button class="link-button button-small" data-action="edit-settlement" data-shipment-id="${esc(shipment.id)}" data-id="${esc(settlement.id)}">编辑</button><button class="link-button danger button-small" data-action="void-settlement" data-id="${esc(settlement.id)}">撤销</button></span>`}</div>`).join('')}</div>` : '';
-      const settlementDetails = `${settlementList}${view.closed ? '<span class="tag tag-green">已结单</span>' : settlementList ? '' : '<span class="tag tag-orange">待返款</span>'}`;
+      const settlementDetails = `${settlementList}${shipmentStatusDetails(view)}`;
       const settlementAction = view.closed
         ? `<button class="link-button" data-action="reopen-shipment" data-id="${esc(shipment.id)}">撤销结单</button>`
         : `<button class="link-button" data-action="close-shipment" data-id="${esc(shipment.id)}">结单</button>`;
       const addSettlementAction = view.closed ? '' : `<button class="link-button" data-action="add-settlement" data-id="${esc(shipment.id)}">记返款</button>`;
       const shipmentEditActions = view.closed ? '' : `<button class="link-button" data-action="edit-shipment" data-id="${esc(shipment.id)}">编辑</button><button class="link-button danger" data-action="void-shipment" data-id="${esc(shipment.id)}">作废</button>`;
-      return `<tr><td class="number">${esc(dateText(shipment.shippedAt))}</td><td><strong>${esc(shipment.trackingNumber)}</strong><div class="muted small">${quantity} 件</div></td><td>${esc(view.items.map(shipmentItemLabel).join('、'))}</td><td class="money">${money(shipment.shippingCostCents)}</td><td class="money">${money(view.expectedRefundCents)}</td><td class="money">${money(view.expectedRebateCents)}</td><td class="money">${money(view.returnedCents)}</td><td>${settlementDetails}</td><td><div class="inline-actions"><button class="link-button" data-action="print-shipment" data-id="${esc(shipment.id)}">打印单子</button>${addSettlementAction}${settlementAction}${shipmentEditActions}</div></td></tr>`;
+      return `<tr><td class="number">${esc(dateText(shipment.shippedAt))}</td><td><strong>${esc(shipment.trackingNumber)}</strong><div class="muted small">${quantity} 件</div></td><td>${esc(view.items.map(shipmentItemLabel).join('、'))}</td><td class="money">${money(shipment.shippingCostCents)}</td><td class="money">${money(view.expectedRefundCents)}</td><td class="money">${money(view.expectedRebateCents)}</td><td class="money">${money(view.returnedCents)}${view.closed ? '<div class="muted small">最终金额</div>' : ''}</td><td>${settlementDetails}</td><td><div class="inline-actions"><button class="link-button" data-action="print-shipment" data-id="${esc(shipment.id)}">打印单子</button>${addSettlementAction}${settlementAction}${shipmentEditActions}</div></td></tr>`;
     }).join('');
   }
 
   function renderShipments() {
     return `${pageHeading('Fulfillment', '快递', '从剩余仓库按先进先出分配商品', '<button class="button" data-action="new-shipment">新增快递</button>')}
       <div class="toolbar"><div class="toolbar-group"><input class="input search-input" data-search="shipments" value="${esc(app.search)}" placeholder="搜索单号、商品、备注"></div><div class="toolbar-group"><span class="muted small">${shipmentViews().length} 笔有效快递</span></div></div>
-      <section class="panel"><div class="table-wrap"><table class="mobile-table shipment-table"><thead><tr><th>发出时间</th><th>单号</th><th>快递内容</th><th>快递价格</th><th>预计返款</th><th>预计返利</th><th>已返款</th><th>状态</th><th>操作</th></tr></thead><tbody>${shipmentRows()}</tbody></table></div></section>`;
+      <section class="panel"><div class="table-wrap"><table class="mobile-table shipment-table"><thead><tr><th>发出时间</th><th>单号</th><th>快递内容</th><th>快递价格</th><th>预计返款</th><th>预计返利</th><th>实际返款</th><th>状态</th><th>操作</th></tr></thead><tbody>${shipmentRows()}</tbody></table></div></section>`;
   }
 
   function renderInventory() {
@@ -543,7 +557,7 @@
   function settlementEditor(shipmentId, settlementId = '') {
     const view = shipmentViews().find((item) => item.shipment.id === shipmentId);
     const settlement = view?.settlements.find((item) => item.id === settlementId);
-    openModal(settlement ? '编辑返款' : '落实快递返款', `<form data-form="settlement"><div class="info-box" style="margin-bottom:16px">${esc(view?.shipment.trackingNumber || '')} · 预计返款 ${money(view?.expectedRefundCents || 0)} · 已登记 ${money(view?.returnedCents || 0)}</div><div class="field-help">实际返款不包含商品预计返利；预计返利会单独计入利润。</div><div class="form-grid"><div class="field"><label>实际返款金额</label><input class="input" name="amount" inputmode="decimal" value="${esc(valueMoney(settlement?.amountCents || 0))}" required></div><div class="field"><label>返款时间</label><input class="input" name="settledAt" type="datetime-local" value="${esc(dateInputValue(settlement?.settledAt))}" required></div><div class="field full"><label>备注</label><input class="input" name="note" value="${esc(settlement?.note || '')}" placeholder="可选"></div></div><div class="form-actions"><button class="button button-quiet" type="button" data-action="close-modal">取消</button><button class="button" type="submit">保存返款</button></div><input type="hidden" name="shipmentId" value="${esc(shipmentId)}"><input type="hidden" name="id" value="${esc(settlement?.id || '')}"></form>`);
+    openModal(settlement ? '编辑返款' : '落实快递返款', `<form data-form="settlement"><div class="info-box" style="margin-bottom:16px">${esc(view?.shipment.trackingNumber || '')} · 预计返款 ${money(view?.expectedRefundCents || 0)} · 已登记 ${money(view?.returnedCents || 0)}<span class="stat-subfoot">当前差额：${esc(refundDifferenceText((view?.returnedCents || 0) - (view?.expectedRefundCents || 0)))}</span></div><div class="field-help">实际返款不包含商品预计返利；预计返利会单独计入利润。结单后，已登记返款总额会作为这批快递的最终价值。</div><div class="form-grid"><div class="field"><label>实际返款金额</label><input class="input" name="amount" inputmode="decimal" value="${esc(valueMoney(settlement?.amountCents || 0))}" required></div><div class="field"><label>返款时间</label><input class="input" name="settledAt" type="datetime-local" value="${esc(dateInputValue(settlement?.settledAt))}" required></div><div class="field full"><label>备注</label><input class="input" name="note" value="${esc(settlement?.note || '')}" placeholder="可选"></div></div><div class="form-actions"><button class="button button-quiet" type="button" data-action="close-modal">取消</button><button class="button" type="submit">保存返款</button></div><input type="hidden" name="shipmentId" value="${esc(shipmentId)}"><input type="hidden" name="id" value="${esc(settlement?.id || '')}"></form>`);
   }
 
   function refundEditor(refundId = '', itemId = '') {
@@ -702,7 +716,11 @@
     else if (action === 'void-shipment') {
       confirmAction('作废快递', '确定作废这笔快递吗？商品会退回可用仓库，已登记返款也不再计入统计。', () => dispatch('shipment.void', { id: target.dataset.id }));
     } else if (action === 'close-shipment') {
-      confirmAction('结单快递', '确定这笔快递的返款已经完成吗？结单后不会继续显示待返款；如需补录或修改返款，可先撤销结单。', () => dispatch('shipment.close', { id: target.dataset.id }));
+      const view = shipmentViews().find((item) => item.shipment.id === target.dataset.id);
+      const expected = view?.expectedRefundCents || 0;
+      const returned = view?.returnedCents || 0;
+      const detail = `预计返款 ${money(expected)}，当前已登记 ${money(returned)}（${refundDifferenceText(returned - expected)}）。`;
+      confirmAction('结单快递', `${detail}结单后已登记返款总额会作为这批快递的最终价值，不能继续编辑；如需修改，请先撤销结单。`, () => dispatch('shipment.close', { id: target.dataset.id }));
     } else if (action === 'reopen-shipment') {
       confirmAction('撤销结单', '撤销后可以继续登记或修改这笔快递的返款，是否继续？', () => dispatch('shipment.reopen', { id: target.dataset.id }));
     } else if (action === 'add-settlement') settlementEditor(target.dataset.id);
