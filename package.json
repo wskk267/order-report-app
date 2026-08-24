@@ -8,7 +8,8 @@
     "start": "node server.js",
     "dev": "node --watch server.js",
     "test": "node --test test/*.test.js",
-    "android:assets": "node scripts/sync-android-assets.js"
+    "android:assets": "node scripts/sync-android-assets.js",
+    "restore:backup": "node scripts/restore-sqlite-backup.js"
   },
   "engines": {
     "node": ">=18.17"

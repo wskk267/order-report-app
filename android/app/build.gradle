@@ -2,6 +2,12 @@ plugins {
     id 'com.android.application'
 }
 
+def signingPropertiesFile = rootProject.file('keystore.properties')
+def signingProperties = new Properties()
+if (signingPropertiesFile.isFile()) {
+    signingPropertiesFile.withInputStream { signingProperties.load(it) }
+}
+
 android {
     namespace 'com.orderreport.app'
     compileSdk 35
@@ -14,8 +20,22 @@ android {
         versionName '0.1.0'
     }
 
+    if (signingPropertiesFile.isFile()) {
+        signingConfigs {
+            release {
+                storeFile rootProject.file(signingProperties['storeFile'])
+                storePassword signingProperties['storePassword']
+                keyAlias signingProperties['keyAlias']
+                keyPassword signingProperties['keyPassword']
+            }
+        }
+    }
+
     buildTypes {
         release {
+            if (signingPropertiesFile.isFile()) {
+                signingConfig signingConfigs.release
+            }
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
         }
@@ -25,4 +45,16 @@ android {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17
     }
+}
+
+def verifyReleaseSigning = tasks.register('verifyReleaseSigning') {
+    doLast {
+        if (!signingPropertiesFile.isFile()) {
+            throw new GradleException('缺少 android/keystore.properties，不能构建已签名 Release APK')
+        }
+    }
+}
+
+tasks.configureEach { task ->
+    if (task.name in ['preReleaseBuild', 'assembleRelease', 'bundleRelease']) task.dependsOn(verifyReleaseSigning)
 }

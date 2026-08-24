@@ -39,10 +39,14 @@
     for (const shipment of state.shipments) {
       if (typeof shipment.closedAt !== 'string' || !shipment.closedAt) shipment.closedAt = null;
     }
-    for (const refund of state.refunds) {
-      const item = state.reportItems.find((row) => row.id === refund.reportItemId);
-      if (item) refund.amountCents = amountForQuantity(item.actualPaymentCents, item.quantity, refund.quantity);
+    const activeShipmentIds = new Set(state.shipments.filter(isActive).map((shipment) => shipment.id));
+    for (const item of state.shipmentItems) {
+      if (isActive(item) && !activeShipmentIds.has(item.shipmentId)) item.status = 'void';
     }
+    for (const settlement of state.settlements) {
+      if (isActive(settlement) && !activeShipmentIds.has(settlement.shipmentId)) settlement.status = 'void';
+    }
+    for (const item of state.reportItems) refreshRefundAmounts(state, item.id);
     return state;
   }
 
@@ -74,7 +78,10 @@
   }
 
   function parseMoney(value, field) {
-    if (typeof value === 'number' && Number.isInteger(value)) return value;
+    if (typeof value === 'number' && Number.isInteger(value)) {
+      if (value < 0) throw new Error(`${field} 必须是非负金额，最多两位小数`);
+      return value;
+    }
     const text = String(value ?? '').trim();
     if (!/^\d+(?:\.\d{1,2})?$/.test(text)) {
       throw new Error(`${field} 必须是非负金额，最多两位小数`);
@@ -99,6 +106,16 @@
     return result;
   }
 
+  function ensureNewIds(state, collection, rows, label) {
+    const seen = new Set();
+    for (const row of rows) {
+      if (!row.id || seen.has(row.id) || state[collection].some((existing) => existing.id === row.id)) {
+        throw new Error(`${label}编号已存在`);
+      }
+      seen.add(row.id);
+    }
+  }
+
   function reportById(state, id) {
     return state.reports.find((row) => row.id === id && isActive(row));
   }
@@ -115,20 +132,34 @@
     if (shipment?.closedAt) throw new Error('快递已结单，请先撤销结单');
   }
 
-  function settlementTotal(state, shipmentId) {
-    return state.settlements
-      .filter((row) => row.shipmentId === shipmentId && isActive(row))
-      .reduce((sum, row) => sum + Number(row.amountCents || 0), 0);
-  }
-
   function reportItems(state, reportId) {
     return state.reportItems.filter((row) => row.reportId === reportId && isActive(row));
   }
 
   function shipmentItemQuantity(state, reportItemId, excludeShipmentId) {
     return state.shipmentItems
-      .filter((row) => row.reportItemId === reportItemId && isActive(row) && row.shipmentId !== excludeShipmentId)
+      .filter((row) => row.reportItemId === reportItemId && isActive(row) && isActive(shipmentById(state, row.shipmentId)) && row.shipmentId !== excludeShipmentId)
       .reduce((sum, row) => sum + Number(row.quantity || 0), 0);
+  }
+
+  function refundSortKey(refund) {
+    return [refund.createdAt || '', refund.refundedAt || ''].join('\u0000');
+  }
+
+  function refreshRefundAmounts(state, reportItemId) {
+    const item = itemById(state, reportItemId);
+    if (!item) return;
+    const refunds = state.refunds
+      .filter((row) => row.reportItemId === reportItemId && isActive(row))
+      .sort((a, b) => refundSortKey(a).localeCompare(refundSortKey(b)));
+    let cumulativeQuantity = 0;
+    let cumulativeAmount = 0;
+    for (const refund of refunds) {
+      cumulativeQuantity += Number(refund.quantity || 0);
+      const targetAmount = amountForQuantity(item.actualPaymentCents, item.quantity, Math.min(cumulativeQuantity, item.quantity));
+      refund.amountCents = Math.max(targetAmount - cumulativeAmount, 0);
+      cumulativeAmount += refund.amountCents;
+    }
   }
 
   function refundQuantity(state, reportItemId) {
@@ -235,6 +266,7 @@
     };
     const items = (payload.items || []).map((item) => ({ ...validateItemPayload(item, idFactory), reportId: id, createdAt: now, updatedAt: now, status: 'active' }));
     if (!items.length) throw new Error('报单至少需要一个商品');
+    ensureNewIds(state, 'reportItems', items, '商品');
     state.reports.push(report);
     state.reportItems.push(...items);
     return { state, result: { id, itemIds: items.map((item) => item.id) } };
@@ -248,6 +280,12 @@
     if (!incomingItems.length) throw new Error('报单至少需要一个商品');
     const existingItems = reportItems(state, report.id);
     const incomingIds = new Set(incomingItems.map((item) => item.id));
+    if (incomingIds.size !== incomingItems.length) throw new Error('商品编号不能重复');
+    for (const item of incomingItems) {
+      const existing = state.reportItems.find((row) => row.id === item.id);
+      if (existing && existing.reportId !== report.id) throw new Error('商品编号已属于其他报单');
+      if (!existing && state.reportItems.some((row) => row.id === item.id)) throw new Error('商品编号已存在');
+    }
     const occurredAt = text(input.occurredAt, '报单时间');
     const reportHasUsedItems = existingItems.some((item) => shipmentItemQuantity(state, item.id) || refundQuantity(state, item.id));
     if (reportHasUsedItems && occurredAt !== report.occurredAt) {
@@ -357,6 +395,10 @@
     shipment.status = 'void';
     shipment.updatedAt = now;
     for (const item of state.shipmentItems.filter((row) => row.shipmentId === shipment.id)) item.status = 'void';
+    for (const settlement of state.settlements.filter((row) => row.shipmentId === shipment.id && isActive(row))) {
+      settlement.status = 'void';
+      settlement.updatedAt = now;
+    }
     return { state, result: { id: shipment.id } };
   }
 
@@ -364,7 +406,7 @@
     const shipment = shipmentById(state, payload.id);
     if (!shipment) throw new Error('快递不存在');
     ensureShipmentOpen(shipment);
-    if (settlementTotal(state, shipment.id) < 1) {
+    if (!state.settlements.some((row) => row.shipmentId === shipment.id && isActive(row))) {
       throw new Error('结单前请先登记实际返款金额');
     }
     shipment.closedAt = now;
@@ -380,21 +422,12 @@
     return { state, result: { id: shipment.id, closedAt: null } };
   }
 
-  function refreshRefundAmounts(state, reportItemId) {
-    const item = itemById(state, reportItemId);
-    if (!item) return;
-    for (const refund of state.refunds.filter((row) => row.reportItemId === reportItemId && isActive(row))) {
-      refund.amountCents = amountForQuantity(item.actualPaymentCents, item.quantity, refund.quantity);
-    }
-  }
-
   function addSettlement(state, payload, now, idFactory) {
     const input = payload.settlement || payload;
     const shipment = shipmentById(state, input.shipmentId);
     if (!shipment) throw new Error('快递不存在');
     ensureShipmentOpen(shipment);
     const amountCents = parseMoney(input.amountCents ?? 0, '实际返款金额');
-    if (amountCents < 1) throw new Error('实际返款金额必须大于 0');
     const settlement = {
       id: input.id || idFactory('settlement'),
       shipmentId: input.shipmentId,
@@ -405,6 +438,7 @@
       updatedAt: now,
       status: 'active',
     };
+    ensureNewIds(state, 'settlements', [settlement], '返款');
     state.settlements.push(settlement);
     return { state, result: { id: settlement.id } };
   }
@@ -422,7 +456,6 @@
       note: text(input.note, '备注', false),
       updatedAt: now,
     });
-    if (settlement.amountCents < 1) throw new Error('实际返款金额必须大于 0');
     return { state, result: { id: settlement.id } };
   }
 
@@ -457,7 +490,9 @@
       updatedAt: now,
       status: 'active',
     };
+    ensureNewIds(state, 'refunds', [refund], '退款');
     state.refunds.push(refund);
+    refreshRefundAmounts(state, item.id);
     return { state, result: { id: refund.id } };
   }
 
@@ -467,25 +502,38 @@
     if (!refund) throw new Error('退款记录不存在');
     const item = itemById(state, refund.reportItemId);
     if (!item) throw new Error('库存批次不存在');
+    const targetItemId = input.reportItemId || refund.reportItemId;
+    const targetItem = itemById(state, targetItemId);
+    if (!targetItem) throw new Error('库存批次不存在');
     const nextQuantity = asPositiveInt(input.quantity, '退款数量');
-    const otherRefunded = refundQuantity(state, item.id) - refund.quantity;
-    const shipped = shipmentItemQuantity(state, item.id);
-    if (nextQuantity + otherRefunded + shipped > item.quantity) throw new Error('退款数量超过可用库存');
+    if (targetItemId === item.id) {
+      const otherRefunded = refundQuantity(state, item.id) - refund.quantity;
+      const shipped = shipmentItemQuantity(state, item.id);
+      if (nextQuantity + otherRefunded + shipped > item.quantity) throw new Error('退款数量超过可用库存');
+    } else {
+      const available = inventoryLots(state).find((lot) => lot.reportItemId === targetItemId);
+      if (!available || available.availableQuantity < nextQuantity) throw new Error('退款数量超过目标批次可用库存');
+    }
     Object.assign(refund, {
+      reportItemId: targetItemId,
       quantity: nextQuantity,
-      amountCents: amountForQuantity(item.actualPaymentCents, item.quantity, nextQuantity),
+      amountCents: 0,
       refundedAt: text(input.refundedAt, '退款时间'),
       note: text(input.note, '备注', false),
       updatedAt: now,
     });
+    refreshRefundAmounts(state, item.id);
+    if (targetItemId !== item.id) refreshRefundAmounts(state, targetItemId);
     return { state, result: { id: refund.id } };
   }
 
   function voidRefund(state, payload, now) {
     const refund = state.refunds.find((row) => row.id === payload.id && isActive(row));
     if (!refund) throw new Error('退款记录不存在');
+    const reportItemId = refund.reportItemId;
     refund.status = 'void';
     refund.updatedAt = now;
+    refreshRefundAmounts(state, reportItemId);
     return { state, result: { id: refund.id } };
   }
 
@@ -607,6 +655,7 @@
       expectedRefundCents: items.reduce((sum, item) => sum + item.expectedRefundCents, 0),
       expectedRebateCents: items.reduce((sum, item) => sum + item.expectedRebateCents, 0),
       returnedCents,
+      settlementRecorded: settlements.length > 0,
       refundVarianceCents: returnedCents - items.reduce((sum, item) => sum + item.expectedRefundCents, 0),
     };
   }

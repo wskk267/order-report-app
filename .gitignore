@@ -5,6 +5,7 @@ runtime/*
 .env.*
 !.env.example
 android/.gradle/
+.gradle-local/
 android/build/
 android/app/build/
 android/local.properties

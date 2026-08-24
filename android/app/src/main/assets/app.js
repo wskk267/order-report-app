@@ -174,7 +174,7 @@
     if (view.closed) {
       return `<span class="tag tag-green">已结单</span><span class="muted small">${esc(refundDifferenceText(view.refundVarianceCents))}</span>`;
     }
-    if (view.returnedCents) return `<span class="tag tag-blue">待结单</span><span class="muted small">已收 ${money(view.returnedCents)} · ${esc(refundDifferenceText(view.refundVarianceCents))}</span>`;
+    if (view.settlementRecorded) return `<span class="tag tag-blue">待结单</span><span class="muted small">已收 ${money(view.returnedCents)} · ${esc(refundDifferenceText(view.refundVarianceCents))}</span>`;
     return '<span class="tag tag-orange">待返款</span>';
   }
 
@@ -523,7 +523,17 @@
   }
 
   function productOptions(excludeShipmentId = '') {
-    return Domain.aggregateInventory(app.state, { excludeShipmentId }).map((product) => `<option value="${esc(product.productName)}">${esc(product.productName)}（余 ${product.availableQuantity}）</option>`).join('');
+    const products = new Map(Domain.aggregateInventory(app.state, { excludeShipmentId }).map((product) => [product.productName, { ...product }]));
+    const current = excludeShipmentId ? shipmentViews().find((view) => view.shipment.id === excludeShipmentId) : null;
+    for (const item of current?.items || []) {
+      const product = products.get(item.productName) || { productName: item.productName, availableQuantity: 0 };
+      product.availableQuantity += Number(item.quantity || 0);
+      products.set(item.productName, product);
+    }
+    return [...products.values()]
+      .sort((a, b) => a.productName.localeCompare(b.productName))
+      .map((product) => `<option value="${esc(product.productName)}">${esc(product.productName)}（余 ${product.availableQuantity}）</option>`)
+      .join('');
   }
 
   function shipmentEditor(shipmentId) {
@@ -564,21 +574,52 @@
     const refund = refundId ? app.state.refunds.find((row) => row.id === refundId) : null;
     const lots = Domain.inventoryLots(app.state);
     const currentLot = refund ? app.state.reportItems.find((item) => item.id === refund.reportItemId) : null;
-    const selectable = refund && currentLot ? [{ ...lots.find((lot) => lot.reportItemId === refund.reportItemId), availableQuantity: (lots.find((lot) => lot.reportItemId === refund.reportItemId)?.availableQuantity || 0) + refund.quantity }] : lots;
+    const currentAvailableLot = currentLot ? lots.find((lot) => lot.reportItemId === currentLot.id) : null;
+    const currentReport = currentLot ? app.state.reports.find((report) => report.id === currentLot.reportId) : null;
+    const currentRefundLot = refund && currentLot ? {
+      reportItemId: currentLot.id,
+      productName: currentLot.productName,
+      sourceDate: currentReport?.occurredAt || '',
+      availableQuantity: (currentAvailableLot?.availableQuantity || 0) + refund.quantity,
+    } : null;
+    const selectable = currentRefundLot
+      ? [currentRefundLot, ...lots.filter((lot) => lot.reportItemId !== currentRefundLot.reportItemId)]
+      : lots;
     const options = selectable.filter(Boolean).map((lot) => `<option value="${esc(lot.reportItemId)}" ${lot.reportItemId === (itemId || refund?.reportItemId) ? 'selected' : ''}>${esc(lot.productName)} · ${esc(dateText(lot.sourceDate))} · 可退 ${lot.availableQuantity}</option>`).join('');
-    const selectedItem = app.state.reportItems.find((item) => item.id === (itemId || refund?.reportItemId));
-    const calculatedAmount = selectedItem ? Domain.amountForQuantity(selectedItem.actualPaymentCents, selectedItem.quantity, refund?.quantity || 1) : 0;
-    openModal(refund ? '编辑退款' : '登记退款', `<form data-form="refund"><div class="form-grid"><div class="field full"><label>商品批次</label><select class="select" name="reportItemId" required><option value="">选择库存批次</option>${options}</select></div><div class="field"><label>退款数量</label><input class="input" name="quantity" type="number" min="1" step="1" value="${esc(refund?.quantity || 1)}" required></div><div class="field"><label>退款金额（自动计算）</label><input class="input" name="amount" value="${esc(valueMoney(calculatedAmount))}" readonly aria-readonly="true"></div><div class="field"><label>退款时间</label><input class="input" name="refundedAt" type="datetime-local" value="${esc(dateInputValue(refund?.refundedAt))}" required></div><div class="field"><label>备注</label><input class="input" name="note" value="${esc(refund?.note || '')}" placeholder="可选"></div></div><div class="info-box" style="margin-top:16px">退款金额 = 商品实际付款总额 × 退款数量 ÷ 商品报单数量。金额由系统生成，不需要手填。</div><div class="warning-box" style="margin-top:12px">退款会使商品退出仓库，并从累计商品付款、预计收益和利率统计中扣除。</div><div class="form-actions"><button class="button button-quiet" type="button" data-action="close-modal">取消</button><button class="button" type="submit">保存退款</button></div><input type="hidden" name="id" value="${esc(refund?.id || '')}"></form>`);
+    openModal(refund ? '编辑退款' : '登记退款', `<form data-form="refund"><div class="form-grid"><div class="field full"><label>商品批次</label><select class="select" name="reportItemId" required><option value="">选择库存批次</option>${options}</select></div><div class="field"><label>退款数量</label><input class="input" name="quantity" type="number" min="1" step="1" value="${esc(refund?.quantity || 1)}" required></div><div class="field"><label>退款金额（自动计算）</label><input class="input" name="amount" value="0.00" readonly aria-readonly="true"></div><div class="field"><label>退款时间</label><input class="input" name="refundedAt" type="datetime-local" value="${esc(dateInputValue(refund?.refundedAt))}" required></div><div class="field"><label>备注</label><input class="input" name="note" value="${esc(refund?.note || '')}" placeholder="可选"></div></div><div class="info-box" style="margin-top:16px">退款金额 = 商品实际付款总额 × 退款数量 ÷ 商品报单数量。金额由系统生成，不需要手填；分次退款的舍入余数会自动计入最后一笔。</div><div class="warning-box" style="margin-top:12px">退款会使商品退出仓库，并从累计商品付款、预计收益和利率统计中扣除。</div><div class="form-actions"><button class="button button-quiet" type="button" data-action="close-modal">取消</button><button class="button" type="submit">保存退款</button></div><input type="hidden" name="id" value="${esc(refund?.id || '')}"></form>`);
     updateRefundAmount($('form[data-form="refund"]'));
   }
 
   function updateRefundAmount(form) {
     if (!form?.elements?.amount) return;
-    const item = app.state.reportItems.find((row) => row.id === form.elements.reportItemId.value);
     const quantity = Number(form.elements.quantity.value || 0);
-    form.elements.amount.value = item && quantity > 0
-      ? valueMoney(Domain.amountForQuantity(item.actualPaymentCents, item.quantity, quantity))
-      : valueMoney(0);
+    const reportItemId = form.elements.reportItemId.value;
+    if (!reportItemId || quantity < 1) {
+      form.elements.amount.value = valueMoney(0);
+      return;
+    }
+    const previewState = Domain.clone(app.state);
+    const refundId = form.elements.id.value;
+    const previewId = refundId || '__preview_refund__';
+    const existing = previewState.refunds.find((refund) => refund.id === refundId);
+    if (existing) {
+      existing.reportItemId = reportItemId;
+      existing.quantity = quantity;
+      existing.refundedAt = form.elements.refundedAt.value;
+    } else {
+      previewState.refunds.push({
+        id: previewId,
+        reportItemId,
+        quantity,
+        refundedAt: form.elements.refundedAt.value,
+        createdAt: '\uffff',
+        updatedAt: '\uffff',
+        status: 'active',
+      });
+    }
+    const normalized = Domain.normalizeState(previewState);
+    const preview = normalized.refunds.find((refund) => refund.id === previewId);
+    form.elements.amount.value = valueMoney(preview?.amountCents || 0);
   }
 
   function shipmentSlipText(view) {

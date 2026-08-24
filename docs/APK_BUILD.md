@@ -18,7 +18,7 @@
 - Android SDK Command-line Tools。
 - Android SDK Platform 35、Platform-Tools 和 Build Tools 35.0.0。
 - JDK 17。
-- Gradle 8.7 或 Android Studio 自带的 Gradle。
+- Gradle Wrapper（项目已包含，版本为 8.7）。
 - Node.js 18.17 或更高版本。
 
 确认 Java 和 Node 环境：
@@ -73,7 +73,7 @@ adb version
 sdkmanager --list | head -n 30
 ```
 
-## 安装 Gradle 8.7
+## 可选：安装独立 Gradle 8.7
 
 Ubuntu 自带的 Gradle 可能版本太旧，直接下载到 `/mnt/nvme/gradle`：
 
@@ -104,7 +104,7 @@ printf 'sdk.dir=/mnt/nvme/android-sdk\n' \
 npm install
 npm run android:assets
 cd android
-gradle --no-daemon assembleDebug
+./gradlew --no-daemon assembleDebug
 ```
 
 生成文件：
@@ -131,11 +131,20 @@ keytool -genkeypair -v \
   -keyalg RSA -keysize 2048 -validity 10000
 ```
 
-把签名配置写到本机的 `android/keystore.properties`，该文件已被 `.gitignore` 排除。然后在 Android Studio 的签名配置中选择这个密钥，或在 `android/app/build.gradle` 中增加 `signingConfigs` 后执行：
+在 `android/keystore.properties` 写入本机签名配置，该文件已被 `.gitignore` 排除：
+
+```properties
+storeFile=../order-report-release.jks
+storePassword=替换为密钥库密码
+keyAlias=order-report
+keyPassword=替换为密钥密码
+```
+
+然后执行：
 
 ```bash
 cd android
-gradle --no-daemon assembleRelease
+./gradlew --no-daemon assembleRelease
 ```
 
 不要把 `.jks`、密码、`keystore.properties` 或已签名 APK 上传到公开 GitHub 仓库。
@@ -148,7 +157,7 @@ gradle --no-daemon assembleRelease
 npm test
 npm run android:assets
 cd android
-gradle --no-daemon assembleDebug
+./gradlew --no-daemon assembleDebug
 ```
 
 退款比例逻辑在 `shared/domain.js` 的 `addRefund` 和 `updateRefund` 中；Android 页面中的只读金额展示在 `public/app.js` 的 `refundEditor` 和 `updateRefundAmount` 中。资源同步脚本会把最新代码复制到 `android/app/src/main/assets/`，否则 APK 可能仍然包含旧页面。

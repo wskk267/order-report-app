@@ -231,3 +231,83 @@ test('shipment view carries item notes for printed slips', () => {
   assert.equal(view.items[0].productName, '商品D');
   assert.equal(view.items[0].productNote, '红色');
 });
+
+test('refund updates can move a record to another inventory batch and preserve exact cents', () => {
+  let state = Domain.emptyState();
+  const idFactory = ids();
+  state = Domain.applyOperation(state, operation('report.create', {
+    report: { id: 'r_rounding', occurredAt: '2026-08-01' },
+    items: [{ id: 'i_rounding', productName: '商品K', quantity: 3, actualPaymentCents: 100, expectedRefundCents: 0, expectedRebateCents: 0 }],
+  }), { idFactory, now: '2026-08-01T10:00:00.000Z' }).state;
+  state = Domain.applyOperation(state, operation('report.create', {
+    report: { id: 'r_target', occurredAt: '2026-08-02' },
+    items: [{ id: 'i_target', productName: '商品L', quantity: 1, actualPaymentCents: 200, expectedRefundCents: 0, expectedRebateCents: 0 }],
+  }), { idFactory, now: '2026-08-02T10:00:00.000Z' }).state;
+
+  for (const [id, refundedAt] of [['f1', '2026-08-03'], ['f2', '2026-08-04'], ['f3', '2026-08-05']]) {
+    state = Domain.applyOperation(state, operation('refund.create', {
+      refund: { id, reportItemId: 'i_rounding', quantity: 1, refundedAt },
+    }), { idFactory, now: `${refundedAt}T10:00:00.000Z` }).state;
+  }
+  assert.deepEqual(state.refunds.map((refund) => refund.amountCents), [33, 34, 33]);
+  assert.equal(state.refunds.reduce((sum, refund) => sum + refund.amountCents, 0), 100);
+
+  state = Domain.applyOperation(state, operation('refund.update', {
+    refund: { id: 'f1', reportItemId: 'i_target', quantity: 1, refundedAt: '2026-08-06' },
+  }), { idFactory, now: '2026-08-06T10:00:00.000Z' }).state;
+  assert.equal(state.refunds.find((refund) => refund.id === 'f1').reportItemId, 'i_target');
+  assert.equal(state.refunds.find((refund) => refund.id === 'f1').amountCents, 200);
+  assert.equal(state.refunds.filter((refund) => refund.reportItemId === 'i_rounding').reduce((sum, refund) => sum + refund.amountCents, 0), 67);
+});
+
+test('zero actual return can be recorded before closing a shipment', () => {
+  let state = Domain.emptyState();
+  const idFactory = ids();
+  state = Domain.applyOperation(state, operation('report.create', reportPayload('r_zero', '商品M', 1, 100, 100, 0)), { idFactory }).state;
+  state = Domain.applyOperation(state, operation('shipment.create', {
+    shipment: { id: 's_zero', trackingNumber: 'TRACK-ZERO', shippingCostCents: 0, shippedAt: '2026-08-02' },
+    items: [{ productName: '商品M', quantity: 1 }],
+  }), { idFactory }).state;
+  state = Domain.applyOperation(state, operation('settlement.create', {
+    settlement: { id: 'settle_zero', shipmentId: 's_zero', amountCents: 0, settledAt: '2026-08-03' },
+  }), { idFactory }).state;
+  state = Domain.applyOperation(state, operation('shipment.close', { id: 's_zero' }), { idFactory, now: '2026-08-04' }).state;
+  const view = Domain.shipmentView(state, state.shipments[0]);
+  assert.equal(view.closed, true);
+  assert.equal(view.settlementRecorded, true);
+  assert.equal(view.returnedCents, 0);
+});
+
+test('voiding an open shipment also voids its actual returns', () => {
+  let state = Domain.emptyState();
+  const idFactory = ids();
+  state = Domain.applyOperation(state, operation('report.create', reportPayload('r_void_settle', '商品N', 1, 100, 100, 0)), { idFactory }).state;
+  state = Domain.applyOperation(state, operation('shipment.create', {
+    shipment: { id: 's_void_settle', trackingNumber: 'TRACK-VOID', shippingCostCents: 0, shippedAt: '2026-08-02' },
+    items: [{ productName: '商品N', quantity: 1 }],
+  }), { idFactory }).state;
+  state = Domain.applyOperation(state, operation('settlement.create', {
+    settlement: { id: 'settle_void', shipmentId: 's_void_settle', amountCents: 100, settledAt: '2026-08-03' },
+  }), { idFactory }).state;
+  state = Domain.applyOperation(state, operation('shipment.void', { id: 's_void_settle' }), { idFactory, now: '2026-08-04' }).state;
+  assert.equal(state.settlements[0].status, 'void');
+  assert.equal(Domain.stats(state).returnedCents, 0);
+});
+
+test('numeric negative money is rejected', () => {
+  assert.throws(() => Domain.parseMoney(-1, '金额'), /非负金额/);
+});
+
+test('normalization releases allocations and returns attached to a void shipment', () => {
+  const state = Domain.normalizeState({
+    reports: [{ id: 'r_orphan', occurredAt: '2026-08-01', status: 'active' }],
+    reportItems: [{ id: 'i_orphan', reportId: 'r_orphan', productName: '商品O', quantity: 1, actualPaymentCents: 100, expectedRefundCents: 100, expectedRebateCents: 0, status: 'active' }],
+    shipments: [{ id: 's_orphan', trackingNumber: 'TRACK-ORPHAN', shippingCostCents: 0, shippedAt: '2026-08-02', status: 'void' }],
+    shipmentItems: [{ id: 'si_orphan', shipmentId: 's_orphan', reportItemId: 'i_orphan', quantity: 1, status: 'active' }],
+    settlements: [{ id: 'set_orphan', shipmentId: 's_orphan', amountCents: 100, settledAt: '2026-08-03', status: 'active' }],
+    refunds: [],
+  });
+  assert.equal(state.shipmentItems[0].status, 'void');
+  assert.equal(state.settlements[0].status, 'void');
+  assert.equal(Domain.inventoryLots(state)[0].availableQuantity, 1);
+});

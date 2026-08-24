@@ -29,7 +29,7 @@
 
 “预计返款”保留原始预测值，用来和快递结单时的实际返款比较；结单后不再用原始预测值代替实际值。未结单快递即使已经收到部分返款，也仍按预计值计入利润，直到结单确认最终金额。累计商品付款包含所有未退款商品的实际付款，未发货商品的成本会计入统计，但总览会在“预计未返款”下方单独显示待发货商品金额。退款商品会从累计商品付款、预计返款和预计返利中排除。金额以分保存，界面按人民币两位小数输入和显示。
 
-快递可以“结单”标记返款已完成；结单前需要至少登记一笔实际返款，结单时会显示实际返款与预计返款的差额。结单后不能继续编辑快递或返款，撤销结单后恢复编辑。已出库或已退款商品的名称、数量、付款和预计金额也不能回改，以免破坏历史统计；备注仍可修改。
+快递可以“结单”标记返款已完成；结单前需要登记一笔实际返款，金额可以是 `0.00`，结单时会显示实际返款与预计返款的差额。结单后不能继续编辑快递或返款，撤销结单后恢复编辑。已出库或已退款商品的名称、数量、付款和预计金额也不能回改，以免破坏历史统计；备注仍可修改。
 
 服务端启动时会创建当天的 SQLite 备份，并每 24 小时检查一次，文件保存在 `runtime/backups/`，每天只保留一份，不覆盖已有备份。
 
@@ -38,6 +38,8 @@
 ```text
 退款金额 = 商品实际付款总额 × 退款数量 / 商品报单数量
 ```
+
+同一商品分多次退款时，系统会按累计比例分配到分，最后一笔自动补齐舍入余数，保证退款合计等于按比例计算的商品付款金额。
 
 ## 本地运行
 
@@ -75,10 +77,10 @@ Android 源码在 `android/`，前端资源由下面的脚本同步到 APK 资�
 ```bash
 npm run android:assets
 cd android
-gradle assembleDebug
+./gradlew assembleDebug
 ```
 
-当前开发机没有 Android SDK/Gradle，因此这里只能完成源码和服务端测试；安装 Android SDK 和 Gradle 后即可构建 APK。APP 是无第三方运行库的 WebView 壳，数据由内置前端保存到 Android WebView 本地存储。
+APP 是无第三方运行库的 WebView 壳，数据由内置前端保存到 Android WebView 本地存储。项目包含 Gradle Wrapper，纯命令行环境不需要安装 Android Studio。
 
 完整的环境准备、Debug/Release 构建和安装步骤见 [`docs/APK_BUILD.md`](docs/APK_BUILD.md)。
 
@@ -88,3 +90,15 @@ gradle assembleDebug
 - `.env`、`runtime/`、数据库、同步令牌、APK 和 Android `local.properties` 已加入 `.gitignore`。
 - Git 提交前不要把真实域名、令牌、导出 JSON 或日志放入仓库。
 - `runtime/sync-token` 是访问业务数据的凭据，不要复制到聊天、截图或公开 issue。
+
+## 恢复 SQLite 备份
+
+恢复前先停止服务。脚本只接受 `runtime/backups/` 下的备份，并会先保留当前数据库：
+
+```bash
+sudo systemctl stop order-report.service
+npm run restore:backup -- runtime/backups/order-report-YYYY-MM-DD.sqlite3
+sudo systemctl start order-report.service
+```
+
+恢复前的数据库会保存为同目录下的 `order-report.sqlite3.before-restore-*` 文件。
