@@ -21,6 +21,13 @@
     };
   }
 
+  function isStateSnapshot(value) {
+    if (!value || typeof value !== 'object' || value.schemaVersion !== SCHEMA_VERSION) return false;
+    return ['reports', 'reportItems', 'shipments', 'shipmentItems', 'settlements', 'refunds']
+      .every((key) => Array.isArray(value[key])
+        && value[key].every((row) => row && typeof row === 'object' && !Array.isArray(row)));
+  }
+
   function clone(value) {
     return JSON.parse(JSON.stringify(value));
   }
@@ -561,6 +568,56 @@
     }
   }
 
+  function pendingOperationBatch(queue, limit = 100) {
+    const maximum = Number(limit);
+    if (!Number.isInteger(maximum) || maximum < 1) throw new Error('同步批次上限必须是正整数');
+    const batch = [];
+    for (const operation of Array.isArray(queue) ? queue : []) {
+      if (!operation?.opId || !operation?.type || operation.syncError) break;
+      batch.push(operation);
+      if (batch.length === maximum) break;
+    }
+    return batch;
+  }
+
+  function reconcilePushResult(queue, attemptedOperations, response) {
+    const attemptedIds = new Set((Array.isArray(attemptedOperations) ? attemptedOperations : [])
+      .map((operation) => operation?.opId)
+      .filter(Boolean));
+    const acceptedIds = new Set((Array.isArray(response?.accepted) ? response.accepted : [])
+      .map((result) => result?.opId)
+      .filter((opId) => attemptedIds.has(opId)));
+    const rejectedById = new Map();
+    for (const result of Array.isArray(response?.rejected) ? response.rejected : []) {
+      if (!attemptedIds.has(result?.opId)) continue;
+      rejectedById.set(result.opId, String(result.error || '服务器拒绝了此操作'));
+    }
+
+    const nextQueue = [];
+    const rejected = [];
+    const unconfirmed = [];
+    for (const operation of Array.isArray(queue) ? queue : []) {
+      if (!attemptedIds.has(operation?.opId)) {
+        nextQueue.push(operation);
+      } else if (rejectedById.has(operation.opId)) {
+        const error = rejectedById.get(operation.opId);
+        nextQueue.push({ ...operation, syncError: error });
+        rejected.push({ opId: operation.opId, error });
+      } else if (acceptedIds.has(operation.opId)) {
+        // Only an explicit acknowledgement is allowed to remove a local operation.
+      } else {
+        nextQueue.push(operation);
+        unconfirmed.push(operation.opId);
+      }
+    }
+    return {
+      queue: nextQueue,
+      accepted: [...acceptedIds].filter((opId) => !rejectedById.has(opId)),
+      rejected,
+      unconfirmed,
+    };
+  }
+
   function stats(state) {
     const activeReports = new Set(state.reports.filter(isActive).map((row) => row.id));
     const activeShipments = new Map(state.shipments.filter(isActive).map((shipment) => [shipment.id, shipment]));
@@ -652,6 +709,7 @@
       closedAt: shipment.closedAt || null,
       items,
       settlements,
+      actualPaymentCents: items.reduce((sum, item) => sum + item.actualPaymentCents, 0),
       expectedRefundCents: items.reduce((sum, item) => sum + item.expectedRefundCents, 0),
       expectedRebateCents: items.reduce((sum, item) => sum + item.expectedRebateCents, 0),
       returnedCents,
@@ -663,6 +721,7 @@
   return {
     SCHEMA_VERSION,
     emptyState,
+    isStateSnapshot,
     normalizeState,
     clone,
     makeId,
@@ -675,6 +734,8 @@
     aggregateInventory,
     allocateFifo,
     applyOperation,
+    pendingOperationBatch,
+    reconcilePushResult,
     stats,
     shipmentView,
     reportById,

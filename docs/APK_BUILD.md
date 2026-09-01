@@ -8,7 +8,7 @@
 - `android/app/src/main/AndroidManifest.xml`：网络权限、应用入口和 HTTPS 安全配置。
 - `public/index.html`、`public/app.js`、`public/styles.css`：业务界面。
 - `shared/domain.js`：报单、FIFO、退款比例、统计和同步操作的核心规则。
-- `scripts/sync-android-assets.js`：把 `public/` 和 `shared/domain.js` 复制到 APK 的 `assets/`。
+- `scripts/sync-android-assets.js`：把 `public/` 和 `shared/domain.js` 复制到 APK 的 `assets/`；Gradle `preBuild` 会自动执行它。
 - `android/app/src/main/assets/`：APK 实际打包的静态资源，不要只修改这里；修改前端后重新执行资源同步。
 
 ## 准备环境
@@ -19,6 +19,7 @@
 - Android SDK Platform 35、Platform-Tools 和 Build Tools 35.0.0。
 - JDK 17。
 - Gradle Wrapper（项目已包含，版本为 8.7）。
+- Android Gradle Plugin 8.6（支持 API 35）。
 - Node.js 18.17 或更高版本。
 
 确认 Java 和 Node 环境：

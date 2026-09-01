@@ -58,3 +58,19 @@ def verifyReleaseSigning = tasks.register('verifyReleaseSigning') {
 tasks.configureEach { task ->
     if (task.name in ['preReleaseBuild', 'assembleRelease', 'bundleRelease']) task.dependsOn(verifyReleaseSigning)
 }
+
+def repositoryRoot = rootProject.projectDir.parentFile
+def syncWebAssets = tasks.register('syncWebAssets', Exec) {
+    group = 'build setup'
+    description = 'Syncs the current web application into Android assets.'
+    workingDir repositoryRoot
+    commandLine 'node', 'scripts/sync-android-assets.js'
+    inputs.dir new File(repositoryRoot, 'public')
+    inputs.dir new File(repositoryRoot, 'shared')
+    inputs.file new File(repositoryRoot, 'scripts/sync-android-assets.js')
+    outputs.dir new File(projectDir, 'src/main/assets')
+}
+
+tasks.named('preBuild').configure {
+    dependsOn syncWebAssets
+}

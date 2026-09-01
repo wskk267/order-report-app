@@ -3,6 +3,7 @@
 
   const Domain = window.OrderDomain;
   const STORAGE_KEY = 'order-report-local-v1';
+  const API_TIMEOUT_MS = 20000;
   const DEFAULT_SETTINGS = { apiBase: '', token: '' };
   const app = {
     state: Domain.emptyState(),
@@ -14,6 +15,9 @@
     search: '',
     syncError: '',
     syncPromise: null,
+    syncRequested: false,
+    localRevision: 0,
+    hasSynced: false,
     modal: null,
     confirmation: null,
     printText: '',
@@ -53,15 +57,35 @@
   function valueMoney(cents) { return Domain.formatMoney(cents); }
   function parseMoneyInput(value, label) { return Domain.parseMoney(value || '0', label); }
 
+  function normalizeSavedQueue(value) {
+    const seen = new Set();
+    return (Array.isArray(value) ? value : []).map((operation) => {
+      const duplicate = Boolean(operation?.opId && seen.has(operation.opId));
+      const valid = operation && typeof operation === 'object' && operation.opId && operation.type && !duplicate;
+      if (valid) {
+        seen.add(operation.opId);
+        return operation;
+      }
+      return {
+        ...(operation && typeof operation === 'object' ? operation : {}),
+        opId: Domain.makeId('invalid_op'),
+        type: operation?.type || 'unknown',
+        syncError: duplicate ? '本机操作编号重复，已停止上传以保护数据' : '本机操作记录不完整，已停止上传以保护数据',
+      };
+    });
+  }
+
   function localStorageRead() {
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
-      if (!raw) return;
-      const saved = JSON.parse(raw);
-      app.state = Domain.normalizeState(saved.state);
-      app.queue = Array.isArray(saved.queue) ? saved.queue : [];
-      app.settings = { ...DEFAULT_SETTINGS, ...(saved.settings || {}) };
-      app.clientId = saved.clientId || '';
+      if (raw) {
+        const saved = JSON.parse(raw);
+        app.state = Domain.normalizeState(saved.state);
+        app.queue = normalizeSavedQueue(saved.queue);
+        app.settings = { ...DEFAULT_SETTINGS, ...(saved.settings || {}) };
+        app.clientId = saved.clientId || '';
+        app.hasSynced = saved.hasSynced === true;
+      }
     } catch (error) {
       app.syncError = `本地数据读取失败: ${error.message}`;
     }
@@ -75,6 +99,7 @@
       queue: app.queue,
       settings: app.settings,
       clientId: app.clientId,
+      hasSynced: app.hasSynced,
     }));
   }
 
@@ -109,14 +134,14 @@
     const { pending, failed } = queueCounts();
     if (!app.settings.apiBase) {
       setSyncStatus('local', pending ? `仅本地 · ${pending}` : failed ? `本地失败 · ${failed}` : '仅本地');
-    } else if (app.syncError) {
-      setSyncStatus('error', pending ? `离线 · ${pending}` : failed ? `失败 · ${failed}` : '离线');
     } else if (failed) {
       setSyncStatus('error', `失败 · ${failed}`);
+    } else if (app.syncError) {
+      setSyncStatus('error', pending ? `离线 · ${pending}` : '离线');
     } else if (pending) {
       setSyncStatus('syncing', `待上传 · ${pending}`);
     } else {
-      setSyncStatus('online', '已同步');
+      setSyncStatus('online', app.hasSynced ? '已同步' : '已配置');
     }
   }
 
@@ -124,7 +149,7 @@
     const { failed } = queueCounts();
     if (!app.settings.apiBase) return { kind: 'local', label: '仅本地' };
     if (app.syncError || failed) return { kind: 'error', label: '需处理' };
-    return { kind: 'online', label: '已配置' };
+    return { kind: 'online', label: app.hasSynced ? '已同步' : '已配置' };
   }
 
   function toast(message, isError = false) {
@@ -201,6 +226,7 @@
   }
 
   function dispatch(type, payload) {
+    const syncWasRunning = Boolean(app.syncPromise);
     const operation = {
       opId: Domain.makeId('op'),
       clientId: app.clientId,
@@ -212,6 +238,8 @@
       const applied = Domain.applyOperation(app.state, operation);
       app.state = applied.state;
       app.queue.push(operation);
+      app.localRevision += 1;
+      if (syncWasRunning) app.syncRequested = true;
       app.syncError = '';
       localStorageWrite();
       closeModal();
@@ -232,41 +260,101 @@
     };
   }
 
+  function ensureSettingsSaved() {
+    const current = settingsFromForm();
+    if (current.apiBase !== app.settings.apiBase || current.token !== app.settings.token) {
+      throw new Error('连接设置有未保存修改，请先点击“保存连接”');
+    }
+  }
+
   async function apiRequest(path, options = {}, connection = app.settings) {
     const base = String(connection.apiBase || '').trim().replace(/\/$/, '');
     if (!base) throw new Error('尚未设置服务器地址');
     const headers = { ...(options.body ? { 'Content-Type': 'application/json' } : {}), ...(options.headers || {}) };
     if (connection.token) headers['X-Sync-Token'] = connection.token;
-    const response = await fetch(`${base}${path}`, { ...options, headers });
-    let body = null;
-    try { body = await response.json(); } catch {}
+    const controller = typeof AbortController === 'function' ? new AbortController() : null;
+    const requestOptions = { ...options, headers };
+    if (controller) requestOptions.signal = controller.signal;
+    let timeoutId = null;
+    const request = (async () => {
+      const response = await fetch(`${base}${path}`, requestOptions);
+      let body = null;
+      try { body = await response.json(); } catch {}
+      return { response, body };
+    })();
+    let result;
+    try {
+      const timeout = new Promise((_, reject) => {
+        timeoutId = setTimeout(() => {
+          reject(new Error('连接服务器超时（20 秒），请检查地址或网络'));
+          if (controller) controller.abort();
+        }, API_TIMEOUT_MS);
+      });
+      result = await Promise.race([request, timeout]);
+    } finally {
+      if (timeoutId !== null) clearTimeout(timeoutId);
+    }
+    const { response, body } = result;
     if (!response.ok) throw new Error(body?.error || `服务器返回 ${response.status}`);
     return body;
   }
 
-  async function pushPendingOperations(allowEmpty = false) {
-    const pending = pendingOperations();
-    if (!pending.length && !allowEmpty) return { pending: 0, rejected: new Map() };
-    const pushed = await apiRequest('/api/sync/push', {
-      method: 'POST',
-      body: JSON.stringify({ clientId: app.clientId, operations: pending }),
-    });
-    const rejected = new Map((pushed.rejected || []).map((item) => [item.opId, item.error]));
-    for (const operation of app.queue) {
-      if (rejected.has(operation.opId)) operation.syncError = rejected.get(operation.opId);
+  function requireServerSnapshot(snapshot) {
+    if (!snapshot || typeof snapshot.version !== 'number' || !Number.isInteger(snapshot.version)
+      || snapshot.version < 0 || !Domain.isStateSnapshot(snapshot.state)) {
+      throw new Error('服务器返回的数据结构不完整，已保留本机数据和待上传操作');
     }
-    const acceptedIds = new Set(pending.filter((operation) => !rejected.has(operation.opId)).map((operation) => operation.opId));
-    app.queue = app.queue.filter((operation) => !acceptedIds.has(operation.opId));
-    app.syncError = rejected.size ? [...rejected.values()][0] : '';
-    const { failed } = queueCounts();
-    if (!rejected.size && !failed && pending.length) app.state = Domain.normalizeState(pushed.state);
-    localStorageWrite();
-    return { pending: pending.length, rejected };
+    return snapshot;
   }
 
-  async function pullServerState(replaceLocal = false) {
-    const pulled = await apiRequest('/api/sync/pull');
+  async function pushPendingBatch(connection = app.settings) {
+    const pending = Domain.pendingOperationBatch(app.queue, 100);
+    if (!pending.length) return null;
+    const pushed = requireServerSnapshot(await apiRequest('/api/sync/push', {
+      method: 'POST',
+      body: JSON.stringify({ clientId: app.clientId, operations: pending }),
+    }, connection));
+    const reconciled = Domain.reconcilePushResult(app.queue, pending, pushed);
+    app.queue = reconciled.queue;
+    if (reconciled.rejected.length) app.syncError = reconciled.rejected[0].error;
+    else if (reconciled.unconfirmed.length) app.syncError = `服务器未确认 ${reconciled.unconfirmed.length} 条操作，已保留在本机等待重试`;
+    if (!reconciled.rejected.length && !reconciled.unconfirmed.length && !app.queue.length && pushed?.state && typeof pushed.state === 'object') {
+      app.state = Domain.normalizeState(pushed.state);
+      app.hasSynced = true;
+    }
+    localStorageWrite();
+    return { attempted: pending.length, ...reconciled };
+  }
+
+  async function pushPendingOperations(connection = app.settings) {
+    let attempted = 0;
+    let accepted = 0;
+    const rejected = new Map();
+    let unconfirmed = [];
+    let blocked = false;
+    while (pendingOperations().length) {
+      const result = await pushPendingBatch(connection);
+      if (!result) {
+        blocked = true;
+        break;
+      }
+      attempted += result.attempted;
+      accepted += result.accepted.length;
+      for (const item of result.rejected) rejected.set(item.opId, item.error);
+      unconfirmed = result.unconfirmed;
+      if (unconfirmed.length) break;
+    }
+    const counts = queueCounts();
+    if (!rejected.size && !unconfirmed.length && !counts.pending && !counts.failed) app.syncError = '';
+    localStorageWrite();
+    return { pending: attempted, accepted, rejected, unconfirmed, blocked };
+  }
+
+  async function pullServerState(replaceLocal = false, connection = app.settings) {
+    const startingRevision = app.localRevision;
+    const pulled = requireServerSnapshot(await apiRequest('/api/sync/pull', {}, connection));
     if (replaceLocal) {
+      if (app.localRevision !== startingRevision) throw new Error('下载期间出现新的本机操作，已取消覆盖并保留本机数据');
       app.state = Domain.normalizeState(pulled.state);
       app.queue = [];
       app.syncError = '';
@@ -274,8 +362,34 @@
       app.state = Domain.normalizeState(pulled.state);
       app.syncError = '';
     }
+    if (!app.queue.length) app.hasSynced = true;
     localStorageWrite();
     return pulled;
+  }
+
+  function updateSyncControls() {
+    const busy = Boolean(app.syncPromise);
+    $$('[data-action="sync"], form[data-form="settings"] button, form[data-form="settings"] input').forEach((control) => {
+      control.disabled = busy;
+      if (busy) control.setAttribute('aria-busy', 'true');
+      else control.removeAttribute('aria-busy');
+    });
+  }
+
+  function runSyncTask(label, task) {
+    if (app.syncPromise) return app.syncPromise;
+    setSyncStatus('syncing', label);
+    app.syncPromise = Promise.resolve()
+      .then(task)
+      .finally(() => {
+        app.syncPromise = null;
+        updateSyncControls();
+        const shouldSyncAgain = app.syncRequested;
+        app.syncRequested = false;
+        if (shouldSyncAgain && pendingOperations().length && app.settings.apiBase) setTimeout(sync, 0);
+      });
+    updateSyncControls();
+    return app.syncPromise;
   }
 
   async function sync() {
@@ -284,71 +398,79 @@
       refreshSyncStatus();
       return;
     }
-    app.syncPromise = (async () => {
-      setSyncStatus('syncing', '同步中');
+    const connection = { ...app.settings };
+    return runSyncTask('同步中', async () => {
       try {
         const { pending, failed } = queueCounts();
-        if (pending) await pushPendingOperations();
-        else if (!failed) await pullServerState();
+        if (pending) await pushPendingOperations(connection);
+        else if (!failed) await pullServerState(false, connection);
         refreshSyncStatus();
         render();
       } catch (error) {
         app.syncError = error.message;
         setSyncStatus('error', '离线保存');
         render();
-      } finally {
-        app.syncPromise = null;
       }
-    })();
-    return app.syncPromise;
+    });
   }
 
-  async function testConnection() {
+  function testConnection() {
     const connection = settingsFromForm();
-    try {
-      if (!connection.apiBase) throw new Error('请先填写服务器地址');
-      setSyncStatus('syncing', '测试中');
-      await apiRequest('/api/health', {}, connection);
-      await apiRequest('/api/sync/pull', {}, connection);
-      app.syncError = '';
-      setSyncStatus('online', '测试成功');
-      toast('连接和同步令牌测试成功');
-    } catch (error) {
-      app.syncError = error.message;
-      setSyncStatus('error', '测试失败');
-      toast(`连接测试失败：${error.message}`, true);
-    }
+    return runSyncTask('测试中', async () => {
+      try {
+        if (!connection.apiBase) throw new Error('请先填写服务器地址');
+        await apiRequest('/api/health', {}, connection);
+        requireServerSnapshot(await apiRequest('/api/sync/pull', {}, connection));
+        app.syncError = '';
+        setSyncStatus('online', '测试成功');
+        toast('连接和同步令牌测试成功');
+      } catch (error) {
+        app.syncError = error.message;
+        setSyncStatus('error', '测试失败');
+        toast(`连接测试失败：${error.message}`, true);
+      }
+    });
   }
 
-  async function uploadData() {
-    try {
-      if (!app.settings.apiBase) throw new Error('请先保存服务器地址和同步令牌');
-      setSyncStatus('syncing', '上传中');
-      const result = await pushPendingOperations(true);
-      if (result.rejected.size) throw new Error([...result.rejected.values()][0]);
-      refreshSyncStatus();
-      toast(result.pending ? `已上传 ${result.pending} 条操作` : '没有待上传操作');
-    } catch (error) {
-      app.syncError = error.message;
-      refreshSyncStatus();
-      toast(`上传失败：${error.message}`, true);
-    }
-    render();
+  function uploadData() {
+    return runSyncTask('上传中', async () => {
+      try {
+        ensureSettingsSaved();
+        if (!app.settings.apiBase) throw new Error('请先保存服务器地址和同步令牌');
+        const connection = { ...app.settings };
+        const before = queueCounts();
+        if (before.failed && !before.pending) throw new Error('当前只有失败操作，未自动重试；请查看下方失败明细');
+        const result = await pushPendingOperations(connection);
+        if (result.rejected.size) throw new Error([...result.rejected.values()][0]);
+        if (result.unconfirmed.length) throw new Error(app.syncError);
+        if (result.blocked) throw new Error('前面有失败操作，后续本机操作已暂停上传，请先导出备份后处理冲突');
+        refreshSyncStatus();
+        toast(result.pending ? `已上传 ${result.accepted} 条操作` : '没有待上传操作');
+      } catch (error) {
+        app.syncError = error.message;
+        refreshSyncStatus();
+        toast(`上传失败：${error.message}`, true);
+      }
+      render();
+    });
   }
 
-  async function performDownload() {
-    try {
-      if (!app.settings.apiBase) throw new Error('请先保存服务器地址和同步令牌');
-      setSyncStatus('syncing', '下载中');
-      await pullServerState(true);
-      refreshSyncStatus();
-      toast('服务器数据已下载到本机');
-    } catch (error) {
-      app.syncError = error.message;
-      refreshSyncStatus();
-      toast(`下载失败：${error.message}`, true);
-    }
-    render();
+  function performDownload() {
+    return runSyncTask('下载中', async () => {
+      try {
+        ensureSettingsSaved();
+        if (!app.settings.apiBase) throw new Error('请先保存服务器地址和同步令牌');
+        const connection = { ...app.settings };
+        await pullServerState(true, connection);
+        refreshSyncStatus();
+        toast('服务器数据已下载到本机');
+      } catch (error) {
+        app.syncError = error.message;
+        refreshSyncStatus();
+        toast(`下载失败：${error.message}`, true);
+      }
+      render();
+    });
   }
 
   function downloadData() {
@@ -404,7 +526,7 @@
       </section>
       <section class="two-column">
         <article class="panel"><div class="panel-heading"><h2>最近报单</h2><button class="link-button" data-view="reports">查看全部</button></div><div class="record-list">${reports.length ? reports.map((report) => { const total = reportTotals(report.id); return `<div class="record-row"><div class="record-main"><div class="record-title">${esc(reportItems(report.id).map((item) => item.productName).join('、'))}</div><div class="record-meta">${esc(dateText(report.occurredAt))} · ${total.quantity} 件</div></div><div class="record-side"><div class="money">${money(total.actualPaymentCents)}</div><div class="muted">返款 ${money(total.expectedRefundCents)} · 返利 ${money(total.expectedRebateCents)}</div></div></div>`; }).join('') : emptyState('还没有报单', '先录入一笔商品报单', '<button class="button button-small" data-action="new-report">新增报单</button>')}</div></article>
-        <article class="panel"><div class="panel-heading"><h2>最近快递</h2><button class="link-button" data-view="shipments">查看全部</button></div><div class="record-list">${shipments.length ? shipments.map((view) => `<div class="record-row"><div class="record-main"><div class="record-title">${esc(view.shipment.trackingNumber)}</div><div class="record-meta">${esc(view.items.map((item) => item.productName).join('、'))} · ${view.items.reduce((sum, item) => sum + item.quantity, 0)} 件</div></div><div class="record-side"><div class="money">${money(view.returnedCents)}</div><div class="muted">返款 ${money(view.expectedRefundCents)} · 返利 ${money(view.expectedRebateCents)}</div></div></div>`).join('') : emptyState('还没有快递', '库存有商品后可以创建快递', '<button class="button button-small" data-action="new-shipment">新增快递</button>')}</div></article>
+        <article class="panel"><div class="panel-heading"><h2>最近快递</h2><button class="link-button" data-view="shipments">查看全部</button></div><div class="record-list">${shipments.length ? shipments.map((view) => `<div class="record-row"><div class="record-main"><div class="record-title">${esc(view.shipment.trackingNumber)}</div><div class="record-meta">${esc(view.items.map((item) => item.productName).join('、'))} · ${view.items.reduce((sum, item) => sum + item.quantity, 0)} 件</div></div><div class="record-side"><div class="money">${money(view.returnedCents)}</div><div class="muted">商品付款 ${money(view.actualPaymentCents)} · 预计返款 ${money(view.expectedRefundCents)} · 返利 ${money(view.expectedRebateCents)}</div></div></div>`).join('') : emptyState('还没有快递', '库存有商品后可以创建快递', '<button class="button button-small" data-action="new-shipment">新增快递</button>')}</div></article>
       </section>`;
   }
 
@@ -428,7 +550,7 @@
   function shipmentRows() {
     const query = app.search.trim().toLowerCase();
     const rows = shipmentViews().filter((view) => !query || shipmentSearchText(view).includes(query)).sort((a, b) => String(b.shipment.shippedAt).localeCompare(String(a.shipment.shippedAt)));
-    if (!rows.length) return `<tr><td colspan="9">${emptyState('没有匹配的快递', '创建一笔快递后会从剩余仓库自动扣减')}</td></tr>`;
+    if (!rows.length) return `<tr><td colspan="10">${emptyState('没有匹配的快递', '创建一笔快递后会从剩余仓库自动扣减')}</td></tr>`;
     return rows.map((view) => {
       const shipment = view.shipment;
       const quantity = view.items.reduce((sum, item) => sum + item.quantity, 0);
@@ -439,14 +561,14 @@
         : `<button class="link-button" data-action="close-shipment" data-id="${esc(shipment.id)}">结单</button>`;
       const addSettlementAction = view.closed ? '' : `<button class="link-button" data-action="add-settlement" data-id="${esc(shipment.id)}">记返款</button>`;
       const shipmentEditActions = view.closed ? '' : `<button class="link-button" data-action="edit-shipment" data-id="${esc(shipment.id)}">编辑</button><button class="link-button danger" data-action="void-shipment" data-id="${esc(shipment.id)}">作废</button>`;
-      return `<tr><td class="number">${esc(dateText(shipment.shippedAt))}</td><td><strong>${esc(shipment.trackingNumber)}</strong><div class="muted small">${quantity} 件</div></td><td>${esc(view.items.map(shipmentItemLabel).join('、'))}</td><td class="money">${money(shipment.shippingCostCents)}</td><td class="money">${money(view.expectedRefundCents)}</td><td class="money">${money(view.expectedRebateCents)}</td><td class="money">${money(view.returnedCents)}${view.closed ? '<div class="muted small">最终金额</div>' : ''}</td><td>${settlementDetails}</td><td><div class="inline-actions"><button class="link-button" data-action="print-shipment" data-id="${esc(shipment.id)}">打印单子</button>${addSettlementAction}${settlementAction}${shipmentEditActions}</div></td></tr>`;
+      return `<tr><td class="number">${esc(dateText(shipment.shippedAt))}</td><td><strong>${esc(shipment.trackingNumber)}</strong><div class="muted small">${quantity} 件</div></td><td>${esc(view.items.map(shipmentItemLabel).join('、'))}</td><td class="money">${money(view.actualPaymentCents)}</td><td class="money">${money(shipment.shippingCostCents)}</td><td class="money">${money(view.expectedRefundCents)}</td><td class="money">${money(view.expectedRebateCents)}</td><td class="money">${money(view.returnedCents)}${view.closed ? '<div class="muted small">最终金额</div>' : ''}</td><td>${settlementDetails}</td><td><div class="inline-actions"><button class="link-button" data-action="print-shipment" data-id="${esc(shipment.id)}">打印单子</button>${addSettlementAction}${settlementAction}${shipmentEditActions}</div></td></tr>`;
     }).join('');
   }
 
   function renderShipments() {
     return `${pageHeading('Fulfillment', '快递', '从剩余仓库按先进先出分配商品', '<button class="button" data-action="new-shipment">新增快递</button>')}
       <div class="toolbar"><div class="toolbar-group"><input class="input search-input" data-search="shipments" value="${esc(app.search)}" placeholder="搜索单号、商品、备注"></div><div class="toolbar-group"><span class="muted small">${shipmentViews().length} 笔有效快递</span></div></div>
-      <section class="panel"><div class="table-wrap"><table class="mobile-table shipment-table"><thead><tr><th>发出时间</th><th>单号</th><th>快递内容</th><th>快递价格</th><th>预计返款</th><th>预计返利</th><th>实际返款</th><th>状态</th><th>操作</th></tr></thead><tbody>${shipmentRows()}</tbody></table></div></section>`;
+      <section class="panel"><div class="table-wrap"><table class="mobile-table shipment-table"><thead><tr><th>发出时间</th><th>单号</th><th>快递内容</th><th>所含商品实际付款</th><th>快递价格</th><th>预计返款</th><th>预计返利</th><th>实际返款</th><th>状态</th><th>操作</th></tr></thead><tbody>${shipmentRows()}</tbody></table></div></section>`;
   }
 
   function renderInventory() {
@@ -474,18 +596,44 @@
       <section class="panel"><div class="table-wrap"><table class="mobile-table refund-table"><thead><tr><th>退款时间</th><th>商品批次</th><th>数量</th><th>退款金额</th><th>备注</th><th>状态</th><th>操作</th></tr></thead><tbody>${refundRows()}</tbody></table></div></section>`;
   }
 
+  function operationLabel(type) {
+    return ({
+      'report.create': '新增报单',
+      'report.update': '编辑报单',
+      'report.void': '作废报单',
+      'shipment.create': '新增快递',
+      'shipment.update': '编辑快递',
+      'shipment.void': '作废快递',
+      'shipment.close': '快递结单',
+      'shipment.reopen': '撤销结单',
+      'settlement.create': '登记返款',
+      'settlement.update': '编辑返款',
+      'settlement.void': '撤销返款',
+      'refund.create': '登记退款',
+      'refund.update': '编辑退款',
+      'refund.void': '撤销退款',
+    })[type] || type || '未知操作';
+  }
+
   function renderSettings() {
     const { pending, failed } = queueCounts();
     const connection = connectionStatus();
+    const failedOperations = app.queue.filter((operation) => operation.syncError);
     return `${pageHeading('Configuration', '设置', '服务器同步和本机数据', '')}
       <section class="settings-stack">
-        <article class="panel"><div class="panel-heading"><h2>同步连接</h2><span class="status-pill ${connection.kind}">${connection.label}</span></div><div class="panel-body padded"><form data-form="settings"><div class="form-grid"><div class="field full"><label for="api-base">服务器地址</label><input class="input" id="api-base" name="apiBase" value="${esc(app.settings.apiBase)}" placeholder="https://order.example.com"><div class="field-help">填写 HTTPS 反向代理地址，例如 https://order.example.com。</div></div><div class="field full"><label for="sync-token">同步令牌</label><input class="input" id="sync-token" name="token" type="password" value="${esc(app.settings.token)}" autocomplete="off" placeholder="从服务器 runtime/sync-token 读取"><div class="field-help">令牌只保存于本机 WebView，不会写入业务 Git 仓库。</div></div></div><div class="sync-actions"><button class="button" type="submit">保存</button><button class="button button-quiet" type="button" data-action="sync-test">测试</button><button class="button button-quiet" type="button" data-action="sync-upload">上传</button><button class="button button-quiet" type="button" data-action="sync-download">下载</button></div></form></div></article>
-        <article class="panel"><div class="panel-heading"><h2>同步状态</h2><span class="muted small">${queueSummary()}</span></div><div class="panel-body padded"><div class="sync-counts"><div><span>待上传操作</span><strong>${pending}</strong></div><div><span>失败待处理</span><strong>${failed}</strong></div></div>${app.syncError ? `<div class="danger-box">${esc(app.syncError)}</div>` : '<div class="info-box">待上传数量只代表尚未送到服务器的本地操作，不代表本机业务数据条数。成功同步后为 0 是正常状态。</div>'}${failed ? `<div class="warning-box" style="margin-top:12px">失败操作不会自动重复提交。请修正数据后重新编辑保存，或使用“下载”放弃这些本机改动。</div>` : ''}</div></article>
+        <article class="panel"><div class="panel-heading"><h2>同步连接</h2><span class="status-pill ${connection.kind}">${connection.label}</span></div><div class="panel-body padded"><form data-form="settings"><div class="form-grid"><div class="field full"><label for="api-base">服务器地址</label><input class="input" id="api-base" name="apiBase" value="${esc(app.settings.apiBase)}" placeholder="https://order.example.com"><div class="field-help">填写 HTTPS 反向代理地址，例如 https://order.example.com。</div></div><div class="field full"><label for="sync-token">同步令牌</label><input class="input" id="sync-token" name="token" type="password" value="${esc(app.settings.token)}" autocomplete="off" placeholder="从服务器 runtime/sync-token 读取"><div class="field-help">令牌只保存于本机 WebView，不会写入业务 Git 仓库。</div></div></div><div class="sync-actions"><button class="button" type="submit">保存连接</button><button class="button button-quiet" type="button" data-action="sync-test">测试当前输入</button><button class="button button-quiet" type="button" data-action="sync-upload">上传待处理</button><button class="button button-quiet" type="button" data-action="sync-download">下载并覆盖</button></div><p class="field-help sync-action-help">测试只使用当前输入且不会保存；上传和下载只使用已保存的连接。下载会以服务器数据覆盖本机。</p></form></div></article>
+        <article class="panel"><div class="panel-heading"><h2>同步状态</h2><span class="muted small">${queueSummary()}</span></div><div class="panel-body padded"><div class="sync-counts"><div><span>待上传操作</span><strong>${pending}</strong></div><div><span>失败待处理</span><strong>${failed}</strong></div></div>${app.syncError ? `<div class="danger-box">${esc(app.syncError)}</div>` : '<div class="info-box">待上传数量只代表尚未送到服务器的本地操作，不代表本机业务数据条数。成功同步后为 0 是正常状态。</div>'}${failedOperations.length ? `<div class="failed-operation-list">${failedOperations.map((operation) => `<div class="failed-operation"><div><strong>${esc(operationLabel(operation.type))}</strong><span>${esc(dateText(operation.createdAt))}</span></div><p>${esc(operation.syncError)}</p></div>`).join('')}</div><div class="warning-box">以上操作仍保留在本机，但不会自动重复提交。若要放弃，请先导出本机数据备份，再使用“下载并覆盖”。</div>` : ''}</div></article>
         <article class="panel"><div class="panel-heading"><h2>数据备份</h2></div><div class="panel-body padded"><div class="backup-actions"><button class="button button-quiet" data-action="export-local">导出本机数据</button><button class="button button-quiet" data-action="export-server">导出服务器数据</button></div><p class="field-help" style="margin-top:12px">导出内容可能包含完整业务数据。手机端会打开系统保存位置，也可以复制 JSON 内容。</p></div></article>
       </section>`;
   }
 
   function render() {
+    let settingsDraft = null;
+    const settingsForm = $('form[data-form="settings"]');
+    if (settingsForm) {
+      const current = settingsFromForm();
+      if (current.apiBase !== app.settings.apiBase || current.token !== app.settings.token) settingsDraft = current;
+    }
     $$('.nav-item').forEach((item) => item.classList.toggle('active', item.dataset.view === app.view));
     const main = $('#main-content');
     if (!main) return;
@@ -495,7 +643,15 @@
     if (app.view === 'inventory') main.innerHTML = renderInventory();
     if (app.view === 'refunds') main.innerHTML = renderRefunds();
     if (app.view === 'settings') main.innerHTML = renderSettings();
+    if (settingsDraft && app.view === 'settings') {
+      const restoredForm = $('form[data-form="settings"]');
+      if (restoredForm) {
+        restoredForm.elements.apiBase.value = settingsDraft.apiBase;
+        restoredForm.elements.token.value = settingsDraft.token;
+      }
+    }
     refreshSyncStatus();
+    updateSyncControls();
   }
 
   function reportEditor(reportId) {
@@ -523,14 +679,7 @@
   }
 
   function productOptions(excludeShipmentId = '') {
-    const products = new Map(Domain.aggregateInventory(app.state, { excludeShipmentId }).map((product) => [product.productName, { ...product }]));
-    const current = excludeShipmentId ? shipmentViews().find((view) => view.shipment.id === excludeShipmentId) : null;
-    for (const item of current?.items || []) {
-      const product = products.get(item.productName) || { productName: item.productName, availableQuantity: 0 };
-      product.availableQuantity += Number(item.quantity || 0);
-      products.set(item.productName, product);
-    }
-    return [...products.values()]
+    return Domain.aggregateInventory(app.state, { excludeShipmentId })
       .sort((a, b) => a.productName.localeCompare(b.productName))
       .map((product) => `<option value="${esc(product.productName)}">${esc(product.productName)}（余 ${product.availableQuantity}）</option>`)
       .join('');
@@ -540,7 +689,8 @@
     const existing = shipmentId ? shipmentViews().find((view) => view.shipment.id === shipmentId) : null;
     const lines = existing ? Object.values(existing.items.reduce((map, item) => { const key = item.productName; map[key] = map[key] || { productName: key, quantity: 0 }; map[key].quantity += item.quantity; return map; }, {})) : [{ productName: '', quantity: 1 }];
     const options = productOptions(shipmentId || '');
-    openModal(existing ? '编辑快递' : '新增快递', `<form data-form="shipment"><div class="form-grid"><div class="field"><label>快递单号</label><input class="input" name="trackingNumber" value="${esc(existing?.shipment.trackingNumber || '')}" required placeholder="单号"></div><div class="field"><label>快递价格</label><input class="input" name="shippingCost" inputmode="decimal" value="${esc(valueMoney(existing?.shipment.shippingCostCents || 0))}" required></div><div class="field"><label>发出时间</label><input class="input" name="shippedAt" type="datetime-local" value="${esc(dateInputValue(existing?.shipment.shippedAt))}" required></div><div class="field"><label>备注</label><input class="input" name="note" value="${esc(existing?.shipment.note || '')}" placeholder="可选"></div></div><div class="modal-section"><div class="modal-section-heading"><h3>快递内容</h3><button class="button button-small button-quiet" type="button" data-action="add-shipment-item">添加商品行</button></div><div class="field-help" style="margin-bottom:10px">保存时会按报单时间从早到晚自动扣除库存批次。</div><div class="table-wrap"><table class="editor-table"><thead><tr><th>商品</th><th>数量</th><th></th></tr></thead><tbody id="shipment-items-editor">${lines.map((line) => shipmentItemEditorRow(line, options)).join('')}</tbody></table></div></div><div class="form-actions"><button class="button button-quiet" type="button" data-action="close-modal">取消</button><button class="button" type="submit">保存快递</button></div><input type="hidden" name="id" value="${esc(existing?.shipment.id || '')}"></form>`, true);
+    openModal(existing ? '编辑快递' : '新增快递', `<form data-form="shipment"><div class="form-grid"><div class="field"><label>快递单号</label><input class="input" name="trackingNumber" value="${esc(existing?.shipment.trackingNumber || '')}" required placeholder="单号"></div><div class="field"><label>快递价格</label><input class="input" name="shippingCost" inputmode="decimal" value="${esc(valueMoney(existing?.shipment.shippingCostCents || 0))}" required></div><div class="field"><label>发出时间</label><input class="input" name="shippedAt" type="datetime-local" value="${esc(dateInputValue(existing?.shipment.shippedAt))}" required></div><div class="field"><label>备注</label><input class="input" name="note" value="${esc(existing?.shipment.note || '')}" placeholder="可选"></div></div><div class="modal-section"><div class="modal-section-heading"><h3>快递内容</h3><button class="button button-small button-quiet" type="button" data-action="add-shipment-item">添加商品行</button></div><div class="field-help" style="margin-bottom:10px">保存时会按报单时间从早到晚自动扣除库存批次。</div><div class="table-wrap"><table class="editor-table"><thead><tr><th>商品</th><th>数量</th><th></th></tr></thead><tbody id="shipment-items-editor">${lines.map((line) => shipmentItemEditorRow(line, options)).join('')}</tbody></table></div><div id="shipment-financial-preview" class="info-box shipment-financial-preview"></div></div><div class="form-actions"><button class="button button-quiet" type="button" data-action="close-modal">取消</button><button class="button" type="submit">保存快递</button></div><input type="hidden" name="id" value="${esc(existing?.shipment.id || '')}"></form>`, true);
+    updateShipmentFinancialPreview($('form[data-form="shipment"]'));
   }
 
   function shipmentItemEditorRow(item, options) {
@@ -562,6 +712,36 @@
       },
       items,
     };
+  }
+
+  function updateShipmentFinancialPreview(form) {
+    const output = form && $('#shipment-financial-preview', form);
+    if (!output) return;
+    const items = $$('.shipment-item-editor', form).map((row) => ({
+      productName: $('[data-field="productName"]', row).value,
+      quantity: Number($('[data-field="quantity"]', row).value),
+    }));
+    if (!items.length || items.some((item) => !item.productName || !Number.isInteger(item.quantity) || item.quantity < 1)) {
+      output.className = 'info-box shipment-financial-preview';
+      output.textContent = '选择商品并填写数量后，这里会自动计算所含商品实际付款和预计返款。';
+      return;
+    }
+    try {
+      const allocations = Domain.allocateFifo(app.state, items, { excludeShipmentId: form.elements.id.value || '' });
+      const totals = allocations.reduce((sum, allocation) => {
+        const source = Domain.itemById(app.state, allocation.reportItemId);
+        if (!source) return sum;
+        sum.actualPaymentCents += Domain.amountForQuantity(source.actualPaymentCents, source.quantity, allocation.quantity);
+        sum.expectedRefundCents += Domain.amountForQuantity(source.expectedRefundCents, source.quantity, allocation.quantity);
+        sum.expectedRebateCents += Domain.amountForQuantity(source.expectedRebateCents, source.quantity, allocation.quantity);
+        return sum;
+      }, { actualPaymentCents: 0, expectedRefundCents: 0, expectedRebateCents: 0 });
+      output.className = 'info-box shipment-financial-preview';
+      output.textContent = `所含商品实际付款 ${money(totals.actualPaymentCents)} · 预计返款 ${money(totals.expectedRefundCents)} · 预计返利 ${money(totals.expectedRebateCents)}`;
+    } catch (error) {
+      output.className = 'warning-box shipment-financial-preview';
+      output.textContent = error.message;
+    }
   }
 
   function settlementEditor(shipmentId, settlementId = '') {
@@ -781,9 +961,13 @@
       if (rows.length > 1) target.closest('tr').remove(); else toast('至少保留一个商品行', true);
     } else if (action === 'add-shipment-item') {
       $('#shipment-items-editor').insertAdjacentHTML('beforeend', shipmentItemEditorRow({ productName: '', quantity: 1 }, productOptions($('input[name="id"]')?.value || '')));
+      updateShipmentFinancialPreview($('form[data-form="shipment"]'));
     } else if (action === 'remove-shipment-item') {
       const rows = $$('.shipment-item-editor');
-      if (rows.length > 1) target.closest('tr').remove(); else toast('至少保留一个商品行', true);
+      if (rows.length > 1) {
+        target.closest('tr').remove();
+        updateShipmentFinancialPreview($('form[data-form="shipment"]'));
+      } else toast('至少保留一个商品行', true);
     } else if (action === 'export-local') localExport();
     else if (action === 'export-server') serverExport();
     else if (action === 'copy-export') copyText(app.exportText, '导出数据已复制');
@@ -793,6 +977,8 @@
   document.addEventListener('input', (event) => {
     const refundForm = event.target.closest?.('form[data-form="refund"]');
     if (refundForm) updateRefundAmount(refundForm);
+    const shipmentForm = event.target.closest?.('form[data-form="shipment"]');
+    if (shipmentForm) updateShipmentFinancialPreview(shipmentForm);
     if (event.target.dataset.search) {
       app.search = event.target.value;
       render();
@@ -804,6 +990,8 @@
   document.addEventListener('change', (event) => {
     const refundForm = event.target.closest?.('form[data-form="refund"]');
     if (refundForm) updateRefundAmount(refundForm);
+    const shipmentForm = event.target.closest?.('form[data-form="shipment"]');
+    if (shipmentForm) updateShipmentFinancialPreview(shipmentForm);
   });
 
   document.addEventListener('submit', (event) => {
@@ -823,7 +1011,13 @@
         const payload = { refund: { id: form.elements.id.value || Domain.makeId('refund'), reportItemId: form.elements.reportItemId.value, quantity: Number(form.elements.quantity.value), refundedAt: form.elements.refundedAt.value, note: form.elements.note.value.trim() } };
         dispatch(form.elements.id.value ? 'refund.update' : 'refund.create', payload);
       } else if (form.dataset.form === 'settings') {
-        app.settings = settingsFromForm();
+        if (app.syncPromise) {
+          toast('同步操作进行中，请稍后再保存连接设置', true);
+          return;
+        }
+        const nextSettings = settingsFromForm();
+        if (nextSettings.apiBase !== app.settings.apiBase || nextSettings.token !== app.settings.token) app.hasSynced = false;
+        app.settings = nextSettings;
         app.syncError = '';
         localStorageWrite();
         render();

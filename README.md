@@ -31,7 +31,7 @@
 
 快递可以“结单”标记返款已完成；结单前需要登记一笔实际返款，金额可以是 `0.00`，结单时会显示实际返款与预计返款的差额。结单后不能继续编辑快递或返款，撤销结单后恢复编辑。已出库或已退款商品的名称、数量、付款和预计金额也不能回改，以免破坏历史统计；备注仍可修改。
 
-服务端启动时会创建当天的 SQLite 备份，并每 24 小时检查一次，文件保存在 `runtime/backups/`，每天只保留一份，不覆盖已有备份。
+服务端启动时会创建当天的 SQLite 备份，并每 24 小时检查一次，文件保存在 `runtime/backups/`，每天只保留一份，不覆盖已有备份；如果当天备份已存在，会先检查 SQLite 完整性和应用状态表，损坏时明确报错。
 
 退款金额公式：
 
@@ -80,6 +80,8 @@ cd android
 ./gradlew assembleDebug
 ```
 
+Gradle 的 `preBuild` 也会自动执行资源同步，避免直接运行 `assembleDebug` 或 `assembleRelease` 时误打包旧页面。
+
 APP 是无第三方运行库的 WebView 壳，数据由内置前端保存到 Android WebView 本地存储。项目包含 Gradle Wrapper，纯命令行环境不需要安装 Android Studio。
 
 完整的环境准备、Debug/Release 构建和安装步骤见 [`docs/APK_BUILD.md`](docs/APK_BUILD.md)。
@@ -93,7 +95,7 @@ APP 是无第三方运行库的 WebView 壳，数据由内置前端保存到 And
 
 ## 恢复 SQLite 备份
 
-恢复前先停止服务。脚本只接受 `runtime/backups/` 下的备份，并会先保留当前数据库：
+恢复前必须先停止服务。脚本只接受 `runtime/backups/` 下的普通文件并拒绝符号链接；恢复前会验证 SQLite 完整性和报单管家状态结构，并以不覆盖的唯一文件名保留当前数据库：
 
 ```bash
 sudo systemctl stop order-report.service

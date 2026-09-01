@@ -40,6 +40,10 @@ test('FIFO allocation separates expected refund and rebate in stats', () => {
     { reportItemId: 'r_old_item', quantity: 2 },
     { reportItemId: 'r_new_item', quantity: 2 },
   ]);
+  const shipment = Domain.shipmentView(state, state.shipments[0]);
+  assert.equal(shipment.actualPaymentCents, 2200);
+  assert.equal(shipment.expectedRefundCents, 400);
+  assert.equal(shipment.expectedRebateCents, 110);
   assert.equal(Domain.inventoryLots(state).find((row) => row.reportItemId === 'r_old_item'), undefined);
   assert.equal(Domain.inventoryLots(state).find((row) => row.reportItemId === 'r_new_item').availableQuantity, 1);
   const summary = Domain.stats(state);
@@ -310,4 +314,42 @@ test('normalization releases allocations and returns attached to a void shipment
   assert.equal(state.shipmentItems[0].status, 'void');
   assert.equal(state.settlements[0].status, 'void');
   assert.equal(Domain.inventoryLots(state)[0].availableQuantity, 1);
+});
+
+test('sync queue removes only explicitly accepted operations and preserves later local work', () => {
+  const queue = [
+    { opId: 'op_a', type: 'report.create' },
+    { opId: 'op_b', type: 'report.update' },
+    { opId: 'op_c', type: 'report.void' },
+    { opId: 'op_new', type: 'shipment.create' },
+  ];
+  const result = Domain.reconcilePushResult(queue, queue.slice(0, 3), {
+    accepted: [{ opId: 'op_a' }],
+    rejected: [{ opId: 'op_b', error: '服务器拒绝' }],
+  });
+  assert.deepEqual(result.accepted, ['op_a']);
+  assert.deepEqual(result.rejected, [{ opId: 'op_b', error: '服务器拒绝' }]);
+  assert.deepEqual(result.unconfirmed, ['op_c']);
+  assert.deepEqual(result.queue.map((operation) => operation.opId), ['op_b', 'op_c', 'op_new']);
+  assert.equal(result.queue[0].syncError, '服务器拒绝');
+  assert.equal(result.queue[1].syncError, undefined);
+});
+
+test('sync batching is capped and stops behind a failed or malformed operation', () => {
+  const queue = Array.from({ length: 201 }, (_, index) => ({ opId: `op_${index}`, type: 'report.create' }));
+  assert.equal(Domain.pendingOperationBatch(queue).length, 100);
+  assert.deepEqual(Domain.pendingOperationBatch([
+    { opId: 'op_ok', type: 'report.create' },
+    { opId: 'op_failed', type: 'report.update', syncError: '冲突' },
+    { opId: 'op_later', type: 'report.void' },
+  ]).map((operation) => operation.opId), ['op_ok']);
+  assert.deepEqual(Domain.pendingOperationBatch([{ type: 'report.create' }, { opId: 'op_later', type: 'report.void' }]), []);
+});
+
+test('server state snapshots must contain every state collection', () => {
+  assert.equal(Domain.isStateSnapshot(Domain.emptyState()), true);
+  assert.equal(Domain.isStateSnapshot({}), false);
+  assert.equal(Domain.isStateSnapshot({ ...Domain.emptyState(), schemaVersion: '1' }), false);
+  assert.equal(Domain.isStateSnapshot({ ...Domain.emptyState(), settlements: null }), false);
+  assert.equal(Domain.isStateSnapshot({ ...Domain.emptyState(), reportItems: [null] }), false);
 });
