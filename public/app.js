@@ -17,13 +17,22 @@
     syncPromise: null,
     syncRequested: false,
     localRevision: 0,
+    storageRevision: 0,
+    storageRefreshPending: false,
     hasSynced: false,
+    lastServerId: '',
+    lastServerVersion: null,
+    lastServerApiBase: '',
+    requiresExplicitDownload: false,
+    recoveryRaw: '',
+    recoveryRaws: [],
     modal: null,
     confirmation: null,
     printText: '',
     exportText: '',
     exportFilename: '',
   };
+  let lastPersistedRaw = null;
 
   const $ = (selector, root = document) => root.querySelector(selector);
   const $$ = (selector, root = document) => [...root.querySelectorAll(selector)];
@@ -52,55 +61,348 @@
   }
   function dateOnlyValue(value, fallbackNow = true) {
     if (value) return String(value).slice(0, 10);
-    return fallbackNow ? new Date().toISOString().slice(0, 10) : '';
+    if (!fallbackNow) return '';
+    const date = new Date(Date.now() - new Date().getTimezoneOffset() * 60000);
+    return date.toISOString().slice(0, 10);
   }
   function valueMoney(cents) { return Domain.formatMoney(cents); }
   function parseMoneyInput(value, label) { return Domain.parseMoney(value || '0', label); }
+  function normalizeApiBase(value) { return String(value || '').trim().replace(/\/+$/, ''); }
+
+  function isNonEmptyString(value) {
+    return typeof value === 'string' && Boolean(value.trim());
+  }
+
+  function isNonNegativeInteger(value) {
+    return Number.isSafeInteger(value) && value >= 0;
+  }
+
+  function isPositiveInteger(value) {
+    return Number.isSafeInteger(value) && value > 0;
+  }
+
+  function normalizeRecoveryRaws(value, legacyRaw = '') {
+    if (!Array.isArray(value)) throw new Error('本地恢复副本集合无效');
+    if (typeof legacyRaw !== 'string') throw new Error('本地恢复副本无效');
+    const result = [];
+    const seen = new Set();
+    for (const raw of [legacyRaw, ...value]) {
+      if (typeof raw !== 'string' || !raw.length) {
+        if (raw === '') continue;
+        throw new Error('本地恢复副本集合无效');
+      }
+      if (!seen.has(raw)) {
+        seen.add(raw);
+        result.push(raw);
+      }
+    }
+    return result;
+  }
+
+  function currentRecoveryRaws() {
+    return normalizeRecoveryRaws(app.recoveryRaws, app.recoveryRaw);
+  }
+
+  function recoverySyncError(count) {
+    return `检测到 ${count} 份本地恢复数据；请先导出全部原始副本，再显式下载覆盖`;
+  }
+
+  function hasUniqueStringIds(rows) {
+    const ids = new Set();
+    for (const row of rows) {
+      if (!isNonEmptyString(row.id) || ids.has(row.id)) return false;
+      ids.add(row.id);
+    }
+    return true;
+  }
+
+  function isSemanticStateSnapshot(state) {
+    const collections = ['reports', 'reportItems', 'shipments', 'shipmentItems', 'settlements', 'refunds'];
+    if (!state || typeof state !== 'object' || state.schemaVersion !== Domain.SCHEMA_VERSION
+      || !collections.every((key) => Array.isArray(state[key]))) return false;
+    try {
+      state = Domain.normalizeState(state);
+    } catch {
+      return false;
+    }
+    if (!Domain.isStateSnapshot(state)) return false;
+    if (!collections.every((key) => hasUniqueStringIds(state[key]))) return false;
+    if (!state.reports.every((row) => isNonEmptyString(row.occurredAt))) return false;
+    if (!state.reportItems.every((row) => isNonEmptyString(row.reportId)
+      && isNonEmptyString(row.productName)
+      && isPositiveInteger(row.quantity)
+      && isNonNegativeInteger(row.actualPaymentCents)
+      && isNonNegativeInteger(row.expectedRefundCents)
+      && isNonNegativeInteger(row.expectedRebateCents))) return false;
+    if (!state.shipments.every((row) => isNonEmptyString(row.trackingNumber)
+      && isNonEmptyString(row.shippedAt)
+      && isNonNegativeInteger(row.shippingCostCents)
+      && (row.closedAt == null || typeof row.closedAt === 'string'))) return false;
+    if (!state.shipmentItems.every((row) => isNonEmptyString(row.shipmentId)
+      && isNonEmptyString(row.reportItemId)
+      && isPositiveInteger(row.quantity))) return false;
+    if (!state.settlements.every((row) => isNonEmptyString(row.shipmentId)
+      && isNonEmptyString(row.settledAt)
+      && isNonNegativeInteger(row.amountCents))) return false;
+    if (!state.refunds.every((row) => isNonEmptyString(row.reportItemId)
+      && isNonEmptyString(row.refundedAt)
+      && isPositiveInteger(row.quantity)
+      && (row.amountCents === undefined || isNonNegativeInteger(row.amountCents)))) return false;
+
+    const reportIds = new Set(state.reports.map((row) => row.id));
+    const itemIds = new Set(state.reportItems.map((row) => row.id));
+    const shipmentIds = new Set(state.shipments.map((row) => row.id));
+    return state.reportItems.every((row) => reportIds.has(row.reportId))
+      && state.shipmentItems.every((row) => shipmentIds.has(row.shipmentId) && itemIds.has(row.reportItemId))
+      && state.settlements.every((row) => shipmentIds.has(row.shipmentId))
+      && state.refunds.every((row) => itemIds.has(row.reportItemId));
+  }
 
   function normalizeSavedQueue(value) {
     const seen = new Set();
-    return (Array.isArray(value) ? value : []).map((operation) => {
-      const duplicate = Boolean(operation?.opId && seen.has(operation.opId));
-      const valid = operation && typeof operation === 'object' && operation.opId && operation.type && !duplicate;
-      if (valid) {
-        seen.add(operation.opId);
-        return operation;
+    if (!Array.isArray(value)) throw new Error('本地同步队列无效');
+    return value.map((operation) => {
+      if (!operation || typeof operation !== 'object' || Array.isArray(operation)
+        || !isNonEmptyString(operation.opId) || seen.has(operation.opId)
+        || !isNonEmptyString(operation.clientId) || !isNonEmptyString(operation.type)
+        || !operation.payload || typeof operation.payload !== 'object' || Array.isArray(operation.payload)
+        || !isNonEmptyString(operation.createdAt)
+        || (operation.syncError !== undefined && typeof operation.syncError !== 'string')) {
+        throw new Error(seen.has(operation?.opId) ? '本机操作编号重复' : '本机操作记录不完整');
       }
-      return {
-        ...(operation && typeof operation === 'object' ? operation : {}),
-        opId: Domain.makeId('invalid_op'),
-        type: operation?.type || 'unknown',
-        syncError: duplicate ? '本机操作编号重复，已停止上传以保护数据' : '本机操作记录不完整，已停止上传以保护数据',
-      };
+      seen.add(operation.opId);
+      return { ...operation };
     });
   }
 
-  function localStorageRead() {
+  function persistentSnapshot(changes = {}) {
+    const value = (key) => Object.prototype.hasOwnProperty.call(changes, key) ? changes[key] : app[key];
+    const snapshot = {
+      state: value('state'),
+      queue: value('queue'),
+      settings: value('settings'),
+      clientId: value('clientId'),
+      hasSynced: value('hasSynced'),
+      lastServerId: value('lastServerId'),
+      lastServerVersion: value('lastServerVersion'),
+      lastServerApiBase: value('lastServerApiBase'),
+      requiresExplicitDownload: value('requiresExplicitDownload'),
+      localRevision: value('localRevision'),
+      storageRevision: value('storageRevision'),
+    };
+    const recoveryRaws = normalizeRecoveryRaws(value('recoveryRaws'), value('recoveryRaw'));
+    if (recoveryRaws.length) {
+      // Keep the original scalar for older builds and single-copy exports.
+      snapshot.recoveryRaw = recoveryRaws[0];
+      snapshot.recoveryRaws = recoveryRaws;
+    }
+    return snapshot;
+  }
+
+  function persistAndCommit(changes = {}, options = {}) {
+    const currentRaw = localStorage.getItem(STORAGE_KEY);
+    if (currentRaw !== lastPersistedRaw) {
+      throw new Error('本机数据已被另一页面更新；已拒绝覆盖，请刷新后重试');
+    }
+    const minimumStorageRevision = isNonNegativeInteger(options.minimumStorageRevision)
+      ? options.minimumStorageRevision
+      : app.storageRevision;
+    const nextStorageRevision = Math.max(app.storageRevision, minimumStorageRevision) + 1;
+    if (!Number.isSafeInteger(nextStorageRevision)) throw new Error('本地存储修订号已达安全上限');
+    const recoveryRaws = normalizeRecoveryRaws(
+      Object.prototype.hasOwnProperty.call(changes, 'recoveryRaws') ? changes.recoveryRaws : app.recoveryRaws,
+      Object.prototype.hasOwnProperty.call(changes, 'recoveryRaw') ? changes.recoveryRaw : app.recoveryRaw,
+    );
+    const committedChanges = {
+      ...changes,
+      recoveryRaw: recoveryRaws[0] || '',
+      recoveryRaws,
+      storageRevision: nextStorageRevision,
+    };
+    const candidate = persistentSnapshot(committedChanges);
+    const candidateRaw = JSON.stringify(candidate);
+    localStorage.setItem(STORAGE_KEY, candidateRaw);
+    lastPersistedRaw = candidateRaw;
+    Object.assign(app, committedChanges);
+    return candidate;
+  }
+
+  function rawStorageRevision(raw) {
+    if (typeof raw !== 'string') return null;
     try {
-      const raw = localStorage.getItem(STORAGE_KEY);
+      const parsed = JSON.parse(raw);
+      return isNonNegativeInteger(parsed?.storageRevision) ? parsed.storageRevision : 0;
+    } catch {
+      return null;
+    }
+  }
+
+  function preserveStorageConflict(raw, reason) {
+    const recoveryRaw = raw === null ? 'null' : raw;
+    const recoveryRaws = normalizeRecoveryRaws([...currentRecoveryRaws(), recoveryRaw]);
+    const incomingRevision = rawStorageRevision(raw);
+    lastPersistedRaw = raw;
+    try {
+      persistAndCommit(
+        { recoveryRaw: recoveryRaws[0], recoveryRaws, syncError: reason },
+        { minimumStorageRevision: incomingRevision === null ? app.storageRevision : incomingRevision },
+      );
+    } catch (error) {
+      app.recoveryRaw = recoveryRaws[0];
+      app.recoveryRaws = recoveryRaws;
+      app.syncError = `${reason}；${recoveryRaws.length} 份恢复副本目前仅保留在本页内存，请立即导出且不要刷新：${error.message}`;
+    }
+  }
+
+  function refreshFromStorage() {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (raw === lastPersistedRaw) return 'unchanged';
+    const incomingRevision = rawStorageRevision(raw);
+    if (incomingRevision === null || incomingRevision <= app.storageRevision) {
+      preserveStorageConflict(raw, '检测到另一页面的并发或旧版数据写入；两份数据均已保留，请先导出恢复数据再处理');
+      return 'conflict';
+    }
+
+    const previous = { ...app };
+    const previousRecoveryRaws = normalizeRecoveryRaws(previous.recoveryRaws, previous.recoveryRaw);
+    localStorageRead();
+    if (app.recoveryRaw === raw) {
+      Object.assign(app, previous);
+      lastPersistedRaw = raw;
+      preserveStorageConflict(raw, '另一页面写入的数据无法安全解析；当前数据和原始冲突副本均已保留');
+      return 'conflict';
+    }
+    const adoptedRecoveryRaws = currentRecoveryRaws();
+    const mergedRecoveryRaws = normalizeRecoveryRaws([...previousRecoveryRaws, ...adoptedRecoveryRaws]);
+    const needsRecoveryMerge = mergedRecoveryRaws.length !== adoptedRecoveryRaws.length
+      || mergedRecoveryRaws.some((item, index) => item !== adoptedRecoveryRaws[index]);
+    if (needsRecoveryMerge) {
+      try {
+        persistAndCommit({
+          recoveryRaw: mergedRecoveryRaws[0] || '',
+          recoveryRaws: mergedRecoveryRaws,
+          syncError: recoverySyncError(mergedRecoveryRaws.length),
+        });
+      } catch (error) {
+        app.recoveryRaw = mergedRecoveryRaws[0] || '';
+        app.recoveryRaws = mergedRecoveryRaws;
+        app.syncError = `已接收另一页面的更高修订，但 ${mergedRecoveryRaws.length} 份合并恢复副本目前仅保留在本页内存；请立即导出且不要刷新：${error.message}`;
+      }
+    }
+    return 'adopted';
+  }
+
+  function hasUncommittedEditor() {
+    if (app.modal) return true;
+    const form = $('form[data-form="settings"]');
+    if (!form) return false;
+    const current = settingsFromForm();
+    return current.apiBase !== app.settings.apiBase || current.token !== app.settings.token;
+  }
+
+  function applyStorageRefresh() {
+    const hadUncommittedEditor = hasUncommittedEditor();
+    const result = refreshFromStorage();
+    if (result === 'unchanged') return result;
+    if (app.modal) closeModal();
+    render({ preserveSettingsDraft: false });
+    if (hadUncommittedEditor) {
+      toast('检测到另一页面已更新本机数据；为避免旧表单覆盖新数据，本页未保存的编辑已关闭，请重新打开后确认', true);
+    }
+    return result;
+  }
+
+  function localStorageRead() {
+    let raw = null;
+    try {
+      raw = localStorage.getItem(STORAGE_KEY);
+      lastPersistedRaw = raw;
       if (raw) {
         const saved = JSON.parse(raw);
+        if (!saved || typeof saved !== 'object' || Array.isArray(saved)) throw new Error('本地存储根对象无效');
+        if (saved.settings !== undefined
+          && (!saved.settings || typeof saved.settings !== 'object' || Array.isArray(saved.settings)
+            || typeof saved.settings.apiBase !== 'string' || typeof saved.settings.token !== 'string')) {
+          throw new Error('本地连接设置无效');
+        }
+        if (saved.clientId !== undefined && typeof saved.clientId !== 'string') throw new Error('本机客户端编号无效');
+        if (saved.hasSynced !== undefined && typeof saved.hasSynced !== 'boolean') throw new Error('本地同步状态无效');
+        if (saved.requiresExplicitDownload !== undefined && typeof saved.requiresExplicitDownload !== 'boolean') {
+          throw new Error('本地下载确认状态无效');
+        }
+        if (saved.lastServerApiBase !== undefined && typeof saved.lastServerApiBase !== 'string') {
+          throw new Error('本地服务器地址标记无效');
+        }
+        const savedRecoveryRaws = normalizeRecoveryRaws(
+          saved.recoveryRaws === undefined ? [] : saved.recoveryRaws,
+          saved.recoveryRaw === undefined ? '' : saved.recoveryRaw,
+        );
+        app.settings = { ...DEFAULT_SETTINGS, ...(saved.settings || {}) };
+        app.clientId = typeof saved.clientId === 'string' ? saved.clientId : '';
+        if (!isSemanticStateSnapshot(saved.state)) throw new Error('本地业务数据结构或字段无效');
+        if (!Array.isArray(saved.queue)) throw new Error('本地同步队列无效');
+        const savedServerId = saved.lastServerId || '';
+        const savedServerVersion = saved.lastServerVersion ?? null;
+        if ((savedServerId && !isNonEmptyString(savedServerId))
+          || (savedServerVersion !== null && !isNonNegativeInteger(savedServerVersion))
+          || Boolean(savedServerId) !== (savedServerVersion !== null)) {
+          throw new Error('本地服务器同步标记无效');
+        }
+        if (saved.localRevision !== undefined && !isNonNegativeInteger(saved.localRevision)) throw new Error('本地操作修订号无效');
+        if (saved.storageRevision !== undefined && !isNonNegativeInteger(saved.storageRevision)) throw new Error('本地存储修订号无效');
         app.state = Domain.normalizeState(saved.state);
         app.queue = normalizeSavedQueue(saved.queue);
-        app.settings = { ...DEFAULT_SETTINGS, ...(saved.settings || {}) };
-        app.clientId = saved.clientId || '';
+        app.localRevision = isNonNegativeInteger(saved.localRevision) ? saved.localRevision : 0;
+        app.storageRevision = isNonNegativeInteger(saved.storageRevision) ? saved.storageRevision : 0;
         app.hasSynced = saved.hasSynced === true;
+        app.lastServerId = savedServerId;
+        app.lastServerVersion = savedServerVersion;
+        app.lastServerApiBase = normalizeApiBase(saved.lastServerApiBase
+          || (app.hasSynced ? app.settings.apiBase : ''));
+        app.requiresExplicitDownload = saved.requiresExplicitDownload === true || (app.hasSynced && !savedServerId);
+        app.recoveryRaws = savedRecoveryRaws;
+        app.recoveryRaw = savedRecoveryRaws[0] || '';
+        app.syncError = app.recoveryRaw
+          ? recoverySyncError(savedRecoveryRaws.length)
+          : app.requiresExplicitDownload
+            ? app.hasSynced && !savedServerId && app.queue.length
+              ? '旧版本本地数据尚未绑定服务器身份；请核对连接后确认绑定并上传'
+              : '本机已有已同步数据，但尚未绑定服务器身份；请使用“下载并覆盖”确认服务器'
+            : '';
+      } else {
+        app.state = Domain.emptyState();
+        app.queue = [];
+        app.settings = { ...DEFAULT_SETTINGS };
+        app.clientId = '';
+        app.hasSynced = false;
+        app.lastServerId = '';
+        app.lastServerVersion = null;
+        app.lastServerApiBase = '';
+        app.requiresExplicitDownload = false;
+        app.recoveryRaw = '';
+        app.recoveryRaws = [];
+        app.localRevision = 0;
+        app.storageRevision = 0;
+        app.syncError = '';
       }
     } catch (error) {
+      app.state = Domain.emptyState();
+      app.queue = [];
+      app.settings = { ...DEFAULT_SETTINGS };
+      app.clientId = '';
+      app.hasSynced = false;
+      app.lastServerId = '';
+      app.lastServerVersion = null;
+      app.lastServerApiBase = '';
+      app.requiresExplicitDownload = false;
+      app.localRevision = 0;
+      app.storageRevision = 0;
+      app.recoveryRaw = raw || '';
+      app.recoveryRaws = raw ? [raw] : [];
       app.syncError = `本地数据读取失败: ${error.message}`;
     }
     if (!app.clientId) app.clientId = Domain.makeId('client');
     if (!app.settings.apiBase && /^https?:$/.test(location.protocol)) app.settings.apiBase = location.origin;
-  }
-
-  function localStorageWrite() {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify({
-      state: app.state,
-      queue: app.queue,
-      settings: app.settings,
-      clientId: app.clientId,
-      hasSynced: app.hasSynced,
-    }));
   }
 
   function setSyncStatus(kind, label) {
@@ -235,13 +537,16 @@
       createdAt: new Date().toISOString(),
     };
     try {
+      if (app.recoveryRaw) throw new Error('本地恢复数据尚未处理；请先导出原始数据，再下载覆盖后继续录入');
       const applied = Domain.applyOperation(app.state, operation);
-      app.state = applied.state;
-      app.queue.push(operation);
-      app.localRevision += 1;
+      const changes = {
+        state: applied.state,
+        queue: [...app.queue, operation],
+        localRevision: app.localRevision + 1,
+        syncError: '',
+      };
+      persistAndCommit(changes);
       if (syncWasRunning) app.syncRequested = true;
-      app.syncError = '';
-      localStorageWrite();
       closeModal();
       render();
       toast('已保存到本机，等待同步');
@@ -255,9 +560,52 @@
     const form = $('form[data-form="settings"]');
     if (!form) return { ...app.settings };
     return {
-      apiBase: form.elements.apiBase.value.trim().replace(/\/$/, ''),
+      apiBase: normalizeApiBase(form.elements.apiBase.value),
       token: form.elements.token.value.trim(),
     };
+  }
+
+  function saveSettings(nextSettings = settingsFromForm(), options = {}) {
+    if (app.syncPromise) throw new Error('同步操作进行中，请稍后再保存连接设置');
+    const normalized = {
+      apiBase: normalizeApiBase(nextSettings.apiBase),
+      token: String(nextSettings.token || '').trim(),
+    };
+    const previousBase = normalizeApiBase(app.settings.apiBase);
+    const baseChanged = normalized.apiBase !== previousBase;
+    const firstConnection = !app.lastServerId && !app.hasSynced
+      && !app.requiresExplicitDownload && !app.recoveryRaw;
+    if (baseChanged && app.queue.length && !firstConnection && !options.allowQueuedServerChange) {
+      throw new Error('本机仍有待处理或失败操作，不能切换连接；请先同步或逐条处理队列');
+    }
+
+    let requiresExplicitDownload = app.requiresExplicitDownload;
+    let hasSynced = app.hasSynced;
+    if (baseChanged) hasSynced = false;
+    const returnedToBoundServer = baseChanged && app.lastServerId
+      && normalized.apiBase === normalizeApiBase(app.lastServerApiBase);
+    if (returnedToBoundServer) {
+      requiresExplicitDownload = false;
+      hasSynced = true;
+    } else if (baseChanged && (app.lastServerId || app.hasSynced)) {
+      requiresExplicitDownload = true;
+    }
+    const syncError = app.recoveryRaw
+      ? '检测到未处理的本地恢复数据；请先导出原始数据，再使用“下载并覆盖”'
+      : requiresExplicitDownload
+        ? app.hasSynced && !app.lastServerId && !baseChanged
+          ? app.queue.length
+            ? '旧版本本地数据尚未绑定服务器身份；请核对连接后确认绑定并上传'
+            : '本机已有旧版本同步数据；请使用“下载并覆盖”确认服务器身份'
+          : '同步服务器地址已改变；请使用“下载并覆盖”确认采用新服务器数据'
+        : '';
+    persistAndCommit({
+      settings: normalized,
+      requiresExplicitDownload,
+      hasSynced,
+      syncError,
+    });
+    return normalized;
   }
 
   function ensureSettingsSaved() {
@@ -268,7 +616,7 @@
   }
 
   async function apiRequest(path, options = {}, connection = app.settings) {
-    const base = String(connection.apiBase || '').trim().replace(/\/$/, '');
+    const base = normalizeApiBase(connection.apiBase);
     if (!base) throw new Error('尚未设置服务器地址');
     const headers = { ...(options.body ? { 'Content-Type': 'application/json' } : {}), ...(options.headers || {}) };
     if (connection.token) headers['X-Sync-Token'] = connection.token;
@@ -300,29 +648,81 @@
   }
 
   function requireServerSnapshot(snapshot) {
-    if (!snapshot || typeof snapshot.version !== 'number' || !Number.isInteger(snapshot.version)
-      || snapshot.version < 0 || !Domain.isStateSnapshot(snapshot.state)) {
+    if (!snapshot || typeof snapshot.version !== 'number' || !Number.isSafeInteger(snapshot.version)
+      || snapshot.version < 0 || !isNonEmptyString(snapshot.serverId) || !isSemanticStateSnapshot(snapshot.state)) {
       throw new Error('服务器返回的数据结构不完整，已保留本机数据和待上传操作');
     }
     return snapshot;
   }
 
+  function assertCompatibleServerSnapshot(snapshot, options = {}) {
+    if (!options.allowServerChange && app.lastServerId && snapshot.serverId !== app.lastServerId) {
+      throw new Error('服务器身份与本机已绑定服务器不一致，已停止同步以保护数据');
+    }
+    if (!options.allowVersionRegression && app.lastServerId === snapshot.serverId
+      && app.lastServerVersion !== null && snapshot.version < app.lastServerVersion) {
+      throw new Error(`服务器版本从 ${app.lastServerVersion} 回退到 ${snapshot.version}，已停止同步；如确认要回退，请使用“下载并覆盖”`);
+    }
+    return snapshot;
+  }
+
+  function serverMetadata(snapshot, connection) {
+    return {
+      lastServerId: snapshot.serverId,
+      lastServerVersion: snapshot.version,
+      lastServerApiBase: normalizeApiBase(connection.apiBase),
+      requiresExplicitDownload: false,
+    };
+  }
+
+  function ensureOrdinarySyncAllowed(connection = app.settings) {
+    if (app.recoveryRaw) throw new Error('检测到未处理的本地恢复数据；请先导出原始数据，再使用“下载并覆盖”');
+    if (app.requiresExplicitDownload && app.hasSynced && !app.lastServerId && app.queue.length) {
+      throw new Error('旧版本本地数据尚未绑定服务器身份；请在设置页确认“绑定当前服务器并上传”，或下载覆盖');
+    }
+    if (app.requiresExplicitDownload) throw new Error('同步连接已改变；请先使用“下载并覆盖”确认采用新服务器数据');
+    const base = normalizeApiBase(connection.apiBase);
+    if (app.lastServerApiBase && base !== app.lastServerApiBase) {
+      throw new Error('当前连接与本机已同步服务器地址不一致；请使用“下载并覆盖”确认切换');
+    }
+  }
+
+  async function preflightPush(connection) {
+    if (!app.lastServerId) return null;
+    const pulled = assertCompatibleServerSnapshot(requireServerSnapshot(await apiRequest('/api/sync/pull', {}, connection)));
+    persistAndCommit(serverMetadata(pulled, connection));
+    return pulled;
+  }
+
   async function pushPendingBatch(connection = app.settings) {
     const pending = Domain.pendingOperationBatch(app.queue, 100);
     if (!pending.length) return null;
-    const pushed = requireServerSnapshot(await apiRequest('/api/sync/push', {
+    const pushed = assertCompatibleServerSnapshot(requireServerSnapshot(await apiRequest('/api/sync/push', {
       method: 'POST',
-      body: JSON.stringify({ clientId: app.clientId, operations: pending }),
-    }, connection));
+      body: JSON.stringify({
+        clientId: app.clientId,
+        operations: pending,
+        ...(app.lastServerId ? {
+          serverId: app.lastServerId,
+          minimumVersion: app.lastServerVersion,
+        } : {}),
+      }),
+    }, connection)));
     const reconciled = Domain.reconcilePushResult(app.queue, pending, pushed);
-    app.queue = reconciled.queue;
-    if (reconciled.rejected.length) app.syncError = reconciled.rejected[0].error;
-    else if (reconciled.unconfirmed.length) app.syncError = `服务器未确认 ${reconciled.unconfirmed.length} 条操作，已保留在本机等待重试`;
-    if (!reconciled.rejected.length && !reconciled.unconfirmed.length && !app.queue.length && pushed?.state && typeof pushed.state === 'object') {
-      app.state = Domain.normalizeState(pushed.state);
-      app.hasSynced = true;
+    const changes = {
+      ...serverMetadata(pushed, connection),
+      queue: reconciled.queue,
+      syncError: reconciled.rejected.length
+        ? reconciled.rejected[0].error
+        : reconciled.unconfirmed.length
+          ? `服务器未确认 ${reconciled.unconfirmed.length} 条操作，已保留在本机等待重试`
+          : app.syncError,
+    };
+    if (!reconciled.rejected.length && !reconciled.unconfirmed.length && !reconciled.queue.length) {
+      changes.state = Domain.normalizeState(pushed.state);
+      changes.hasSynced = true;
     }
-    localStorageWrite();
+    persistAndCommit(changes);
     return { attempted: pending.length, ...reconciled };
   }
 
@@ -346,30 +746,37 @@
     }
     const counts = queueCounts();
     if (!rejected.size && !unconfirmed.length && !counts.pending && !counts.failed) app.syncError = '';
-    localStorageWrite();
     return { pending: attempted, accepted, rejected, unconfirmed, blocked };
   }
 
   async function pullServerState(replaceLocal = false, connection = app.settings) {
     const startingRevision = app.localRevision;
     const pulled = requireServerSnapshot(await apiRequest('/api/sync/pull', {}, connection));
+    assertCompatibleServerSnapshot(pulled, {
+      allowServerChange: replaceLocal,
+      allowVersionRegression: replaceLocal,
+    });
+    const changes = serverMetadata(pulled, connection);
     if (replaceLocal) {
       if (app.localRevision !== startingRevision) throw new Error('下载期间出现新的本机操作，已取消覆盖并保留本机数据');
-      app.state = Domain.normalizeState(pulled.state);
-      app.queue = [];
-      app.syncError = '';
+      changes.state = Domain.normalizeState(pulled.state);
+      changes.queue = [];
+      changes.syncError = '';
+      changes.hasSynced = true;
+      changes.recoveryRaw = '';
+      changes.recoveryRaws = [];
     } else if (!app.queue.length) {
-      app.state = Domain.normalizeState(pulled.state);
-      app.syncError = '';
+      changes.state = Domain.normalizeState(pulled.state);
+      changes.syncError = '';
+      changes.hasSynced = true;
     }
-    if (!app.queue.length) app.hasSynced = true;
-    localStorageWrite();
+    persistAndCommit(changes);
     return pulled;
   }
 
   function updateSyncControls() {
     const busy = Boolean(app.syncPromise);
-    $$('[data-action="sync"], form[data-form="settings"] button, form[data-form="settings"] input').forEach((control) => {
+    $$('[data-action="sync"], [data-action="sync-bind-upload"], [data-action="retry-failed"], [data-action="discard-failed"], form[data-form="settings"] button, form[data-form="settings"] input').forEach((control) => {
       control.disabled = busy;
       if (busy) control.setAttribute('aria-busy', 'true');
       else control.removeAttribute('aria-busy');
@@ -386,14 +793,21 @@
         updateSyncControls();
         const shouldSyncAgain = app.syncRequested;
         app.syncRequested = false;
-        if (shouldSyncAgain && pendingOperations().length && app.settings.apiBase) setTimeout(sync, 0);
+        if (app.storageRefreshPending) {
+          app.storageRefreshPending = false;
+          applyStorageRefresh();
+        }
+        if (shouldSyncAgain && app.settings.apiBase) setTimeout(sync, 0);
       });
     updateSyncControls();
     return app.syncPromise;
   }
 
   async function sync() {
-    if (app.syncPromise) return app.syncPromise;
+    if (app.syncPromise) {
+      app.syncRequested = true;
+      return app.syncPromise;
+    }
     if (!app.settings.apiBase) {
       refreshSyncStatus();
       return;
@@ -401,8 +815,12 @@
     const connection = { ...app.settings };
     return runSyncTask('同步中', async () => {
       try {
+        ensureOrdinarySyncAllowed(connection);
         const { pending, failed } = queueCounts();
-        if (pending) await pushPendingOperations(connection);
+        if (pending) {
+          await preflightPush(connection);
+          await pushPendingOperations(connection);
+        }
         else if (!failed) await pullServerState(false, connection);
         refreshSyncStatus();
         render();
@@ -438,8 +856,10 @@
         ensureSettingsSaved();
         if (!app.settings.apiBase) throw new Error('请先保存服务器地址和同步令牌');
         const connection = { ...app.settings };
+        ensureOrdinarySyncAllowed(connection);
         const before = queueCounts();
         if (before.failed && !before.pending) throw new Error('当前只有失败操作，未自动重试；请查看下方失败明细');
+        if (before.pending) await preflightPush(connection);
         const result = await pushPendingOperations(connection);
         if (result.rejected.size) throw new Error([...result.rejected.values()][0]);
         if (result.unconfirmed.length) throw new Error(app.syncError);
@@ -455,7 +875,51 @@
     });
   }
 
+  function performBindAndUpload() {
+    if (app.syncPromise) {
+      toast('同步操作进行中，请稍后确认绑定', true);
+      return app.syncPromise;
+    }
+    return runSyncTask('绑定并上传中', async () => {
+      try {
+        ensureSettingsSaved();
+        if (!app.settings.apiBase) throw new Error('请先保存服务器地址和同步令牌');
+        const { pending } = queueCounts();
+        if (app.lastServerId || !app.hasSynced || !pending) {
+          throw new Error('当前没有需要人工确认绑定的旧版本待上传队列');
+        }
+        const connection = { ...app.settings };
+        const pulled = requireServerSnapshot(await apiRequest('/api/sync/pull', {}, connection));
+        persistAndCommit({
+          ...serverMetadata(pulled, connection),
+          syncError: '',
+        });
+        const result = await pushPendingOperations(connection);
+        if (result.rejected.size) throw new Error([...result.rejected.values()][0]);
+        if (result.unconfirmed.length) throw new Error(app.syncError);
+        if (result.blocked) throw new Error('前面有失败操作，后续本机操作仍暂停上传，请逐条处理失败操作');
+        refreshSyncStatus();
+        toast(`已绑定服务器并上传 ${result.accepted} 条操作`);
+      } catch (error) {
+        app.syncError = error.message;
+        refreshSyncStatus();
+        toast(`绑定上传失败：${error.message}`, true);
+      }
+      render();
+    });
+  }
+
+  function bindCurrentServerAndUpload() {
+    const { pending, failed } = queueCounts();
+    const apiBase = normalizeApiBase(app.settings.apiBase) || '当前连接';
+    confirmAction('绑定当前服务器并上传', `当前旧版本本地数据没有服务器身份记录。确认后会将 ${pending} 条待上传操作发送到 ${apiBase}；服务器若不是原实例，操作可能冲突，${failed} 条失败操作仍需逐条处理。是否继续？`, performBindAndUpload);
+  }
+
   function performDownload() {
+    if (app.syncPromise) {
+      toast('同步操作进行中，请稍后再下载覆盖', true);
+      return app.syncPromise;
+    }
     return runSyncTask('下载中', async () => {
       try {
         ensureSettingsSaved();
@@ -475,11 +939,10 @@
 
   function downloadData() {
     const { pending, failed } = queueCounts();
-    if (pending || failed) {
-      confirmAction('覆盖本机数据', `当前有 ${pending} 条待上传、${failed} 条失败操作。下载会覆盖本机数据并清空这些操作，是否继续？`, performDownload);
-    } else {
-      performDownload();
-    }
+    const recoveryCount = currentRecoveryRaws().length;
+    const recovery = recoveryCount ? `检测到 ${recoveryCount} 份未处理的原始恢复数据。` : '';
+    const queueWarning = pending || failed ? `当前有 ${pending} 条待上传、${failed} 条失败操作。` : '';
+    confirmAction('覆盖本机数据', `${recovery}${queueWarning}下载会始终以服务器数据覆盖本机，并清空本机队列；也可能切换服务器身份或接受较旧版本。是否继续？`, performDownload);
   }
 
   function openModal(title, body, wide = false) {
@@ -575,10 +1038,10 @@
     const lots = Domain.inventoryLots(app.state);
     const aggregate = Domain.aggregateInventory(app.state);
     const availableQuantity = lots.reduce((sum, lot) => sum + lot.availableQuantity, 0);
-    const availableValue = lots.reduce((sum, lot) => sum + Domain.amountForQuantity(lot.actualPaymentCents, lot.quantity, lot.availableQuantity), 0);
+    const availableValue = lots.reduce((sum, lot) => sum + lot.availableActualPaymentCents, 0);
     return `${pageHeading('Inventory', '仓库', '当前未发快递、未退款的商品批次', '<button class="button" data-action="new-refund">登记退款</button>')}
       <section class="stock-summary"><div class="panel"><div class="muted small">可用商品种类</div><div class="summary-value">${aggregate.length}</div></div><div class="panel"><div class="muted small">可用商品数量</div><div class="summary-value number">${availableQuantity}</div></div><div class="panel"><div class="muted small">可用商品成本</div><div class="summary-value money">${money(availableValue)}</div></div></section>
-      <section class="panel"><div class="panel-heading"><h2>库存批次</h2><span class="muted small">按报单时间排序</span></div><div class="table-wrap"><table class="mobile-table inventory-table"><thead><tr><th>商品</th><th>报单时间</th><th>批次数量</th><th>剩余</th><th>单位成本</th><th>单位预计收益</th><th>操作</th></tr></thead><tbody>${lots.length ? lots.map((lot) => `<tr><td><strong>${esc(lot.productName)}</strong></td><td>${esc(dateText(lot.sourceDate))}</td><td class="number">${lot.quantity}</td><td class="number"><span class="tag tag-green">${lot.availableQuantity}</span></td><td class="money">${money(Domain.amountForQuantity(lot.actualPaymentCents, lot.quantity, 1))}</td><td class="money">${money(Domain.amountForQuantity(lot.expectedRefundCents + lot.expectedRebateCents, lot.quantity, 1))}</td><td><button class="link-button" data-action="new-refund" data-id="${esc(lot.reportItemId)}">退款</button></td></tr>`).join('') : `<tr><td colspan="7">${emptyState('仓库为空', '新增报单后会在这里形成可用库存')}</td></tr>`}</tbody></table></div></section>`;
+      <section class="panel"><div class="panel-heading"><h2>库存批次</h2><span class="muted small">按报单时间排序</span></div><div class="table-wrap"><table class="mobile-table inventory-table"><thead><tr><th>商品</th><th>报单时间</th><th>批次数量</th><th>剩余</th><th>剩余成本</th><th>剩余预计收益</th><th>操作</th></tr></thead><tbody>${lots.length ? lots.map((lot) => `<tr><td><strong>${esc(lot.productName)}</strong></td><td>${esc(dateText(lot.sourceDate))}</td><td class="number">${lot.quantity}</td><td class="number"><span class="tag tag-green">${lot.availableQuantity}</span></td><td class="money">${money(lot.availableActualPaymentCents)}</td><td class="money">${money(lot.availableExpectedRefundCents + lot.availableExpectedRebateCents)}</td><td><button class="link-button" data-action="new-refund" data-id="${esc(lot.reportItemId)}">退款</button></td></tr>`).join('') : `<tr><td colspan="7">${emptyState('仓库为空', '新增报单后会在这里形成可用库存')}</td></tr>`}</tbody></table></div></section>`;
   }
 
   function refundRows() {
@@ -615,21 +1078,125 @@
     })[type] || type || '未知操作';
   }
 
+  function retryFailedOperation(opId) {
+    if (app.syncPromise) {
+      toast('同步操作进行中，请稍后重试失败操作', true);
+      return false;
+    }
+    const index = app.queue.findIndex((operation) => operation.opId === opId && operation.syncError);
+    if (index < 0) {
+      toast('失败操作不存在或已经处理', true);
+      return false;
+    }
+    try {
+      const queue = [...app.queue];
+      const operation = { ...queue[index] };
+      delete operation.syncError;
+      queue[index] = {
+        ...operation,
+        opId: Domain.makeId('op'),
+        clientId: app.clientId,
+        createdAt: new Date().toISOString(),
+      };
+      persistAndCommit({
+        queue,
+        localRevision: app.localRevision + 1,
+        syncError: '',
+      });
+      render();
+      toast('已用新的操作编号重新加入上传队列');
+      sync();
+      return true;
+    } catch (error) {
+      toast(error.message, true);
+      return false;
+    }
+  }
+
+  function discardFailedOperation(opId) {
+    if (app.syncPromise) {
+      toast('同步操作进行中，请稍后丢弃失败操作', true);
+      return false;
+    }
+    const operation = app.queue.find((item) => item.opId === opId && item.syncError);
+    if (!operation) {
+      toast('失败操作不存在或已经处理', true);
+      return false;
+    }
+    if (!app.lastServerId || app.lastServerVersion === null) {
+      app.syncError = '当前本机数据尚未绑定服务器身份，无法安全丢弃失败操作';
+      refreshSyncStatus();
+      render();
+      toast(app.syncError, true);
+      return false;
+    }
+    const connection = { ...app.settings };
+    const startingRevision = app.localRevision;
+    const startingQueue = app.queue;
+    return runSyncTask('校正失败操作中', async () => {
+      try {
+        ensureSettingsSaved();
+        if (!connection.apiBase) throw new Error('请先保存服务器地址和同步令牌');
+        ensureOrdinarySyncAllowed(connection);
+        const pulled = assertCompatibleServerSnapshot(requireServerSnapshot(
+          await apiRequest('/api/sync/pull', {}, connection),
+        ));
+        if (app.localRevision !== startingRevision || app.queue !== startingQueue) {
+          throw new Error('拉取期间本机队列已改变，已取消丢弃');
+        }
+        const currentOperation = app.queue.find((item) => item.opId === opId && item.syncError);
+        if (!currentOperation) throw new Error('失败操作在校正期间已改变');
+        const queue = app.queue.filter((item) => item !== currentOperation);
+        let state = Domain.normalizeState(pulled.state);
+        for (const queuedOperation of queue) {
+          try {
+            state = Domain.applyOperation(state, queuedOperation, { now: queuedOperation.createdAt }).state;
+          } catch (error) {
+            throw new Error(`重放保留操作“${operationLabel(queuedOperation.type)}”失败：${error.message}`);
+          }
+        }
+        const remainingFailure = queue.find((item) => item.syncError);
+        persistAndCommit({
+          ...serverMetadata(pulled, connection),
+          state,
+          queue,
+          localRevision: app.localRevision + 1,
+          syncError: remainingFailure?.syncError || '',
+          hasSynced: queue.length ? app.hasSynced : true,
+        });
+        if (queue.some((item) => !item.syncError)) app.syncRequested = true;
+        render();
+        toast('已从服务器权威状态重建本机数据并丢弃指定操作');
+        return true;
+      } catch (error) {
+        app.syncError = `未能安全丢弃：${error.message}`;
+        refreshSyncStatus();
+        render();
+        toast(app.syncError, true);
+        return false;
+      }
+    });
+  }
+
   function renderSettings() {
     const { pending, failed } = queueCounts();
     const connection = connectionStatus();
     const failedOperations = app.queue.filter((operation) => operation.syncError);
+    const recoveryCount = currentRecoveryRaws().length;
+    const legacyBindingAction = app.hasSynced && !app.lastServerId && pending
+      ? '<div class="warning-box">这是旧版本留下的已同步数据和待上传队列，缺少服务器身份记录。普通同步已暂停；请核对地址后人工确认绑定，队列才会上传。</div><div class="backup-actions"><button class="button" type="button" data-action="sync-bind-upload">绑定当前服务器并上传</button></div>'
+      : '';
     return `${pageHeading('Configuration', '设置', '服务器同步和本机数据', '')}
       <section class="settings-stack">
         <article class="panel"><div class="panel-heading"><h2>同步连接</h2><span class="status-pill ${connection.kind}">${connection.label}</span></div><div class="panel-body padded"><form data-form="settings"><div class="form-grid"><div class="field full"><label for="api-base">服务器地址</label><input class="input" id="api-base" name="apiBase" value="${esc(app.settings.apiBase)}" placeholder="https://order.example.com"><div class="field-help">填写 HTTPS 反向代理地址，例如 https://order.example.com。</div></div><div class="field full"><label for="sync-token">同步令牌</label><input class="input" id="sync-token" name="token" type="password" value="${esc(app.settings.token)}" autocomplete="off" placeholder="从服务器 runtime/sync-token 读取"><div class="field-help">令牌只保存于本机 WebView，不会写入业务 Git 仓库。</div></div></div><div class="sync-actions"><button class="button" type="submit">保存连接</button><button class="button button-quiet" type="button" data-action="sync-test">测试当前输入</button><button class="button button-quiet" type="button" data-action="sync-upload">上传待处理</button><button class="button button-quiet" type="button" data-action="sync-download">下载并覆盖</button></div><p class="field-help sync-action-help">测试只使用当前输入且不会保存；上传和下载只使用已保存的连接。下载会以服务器数据覆盖本机。</p></form></div></article>
-        <article class="panel"><div class="panel-heading"><h2>同步状态</h2><span class="muted small">${queueSummary()}</span></div><div class="panel-body padded"><div class="sync-counts"><div><span>待上传操作</span><strong>${pending}</strong></div><div><span>失败待处理</span><strong>${failed}</strong></div></div>${app.syncError ? `<div class="danger-box">${esc(app.syncError)}</div>` : '<div class="info-box">待上传数量只代表尚未送到服务器的本地操作，不代表本机业务数据条数。成功同步后为 0 是正常状态。</div>'}${failedOperations.length ? `<div class="failed-operation-list">${failedOperations.map((operation) => `<div class="failed-operation"><div><strong>${esc(operationLabel(operation.type))}</strong><span>${esc(dateText(operation.createdAt))}</span></div><p>${esc(operation.syncError)}</p></div>`).join('')}</div><div class="warning-box">以上操作仍保留在本机，但不会自动重复提交。若要放弃，请先导出本机数据备份，再使用“下载并覆盖”。</div>` : ''}</div></article>
+        <article class="panel"><div class="panel-heading"><h2>同步状态</h2><span class="muted small">${queueSummary()}</span></div><div class="panel-body padded"><div class="sync-counts"><div><span>待上传操作</span><strong>${pending}</strong></div><div><span>失败待处理</span><strong>${failed}</strong></div></div>${legacyBindingAction}${app.syncError ? `<div class="danger-box">${esc(app.syncError)}</div>` : '<div class="info-box">待上传数量只代表尚未送到服务器的本地操作，不代表本机业务数据条数。成功同步后为 0 是正常状态。</div>'}${recoveryCount ? `<div class="warning-box">已完整保留 ${recoveryCount} 份原始本地恢复副本。请先全部导出，再决定是否下载覆盖。</div><div class="backup-actions"><button class="button button-quiet" data-action="export-recovery">导出 ${recoveryCount} 份原始恢复数据</button></div>` : ''}${failedOperations.length ? `<div class="failed-operation-list">${failedOperations.map((operation) => `<div class="failed-operation"><div><strong>${esc(operationLabel(operation.type))}</strong><span>${esc(dateText(operation.createdAt))}</span></div><p>${esc(operation.syncError)}</p><div class="inline-actions"><button class="link-button" data-action="retry-failed" data-id="${esc(operation.opId)}">换新编号重试</button><button class="link-button danger" data-action="discard-failed" data-id="${esc(operation.opId)}">安全丢弃此条</button></div></div>`).join('')}</div><div class="warning-box">失败操作不会自动重复提交。重试会生成新的操作编号；安全丢弃会先从已绑定服务器拉取权威状态，再重放其余队列。离线、服务器不符或任一重放失败时不会更改本机数据。</div>` : ''}</div></article>
         <article class="panel"><div class="panel-heading"><h2>数据备份</h2></div><div class="panel-body padded"><div class="backup-actions"><button class="button button-quiet" data-action="export-local">导出本机数据</button><button class="button button-quiet" data-action="export-server">导出服务器数据</button></div><p class="field-help" style="margin-top:12px">导出内容可能包含完整业务数据。手机端会打开系统保存位置，也可以复制 JSON 内容。</p></div></article>
       </section>`;
   }
 
-  function render() {
+  function render(options = {}) {
     let settingsDraft = null;
-    const settingsForm = $('form[data-form="settings"]');
+    const settingsForm = options.preserveSettingsDraft === false ? null : $('form[data-form="settings"]');
     if (settingsForm) {
       const current = settingsFromForm();
       if (current.apiBase !== app.settings.apiBase || current.token !== app.settings.token) settingsDraft = current;
@@ -727,13 +1294,13 @@
       return;
     }
     try {
-      const allocations = Domain.allocateFifo(app.state, items, { excludeShipmentId: form.elements.id.value || '' });
-      const totals = allocations.reduce((sum, allocation) => {
-        const source = Domain.itemById(app.state, allocation.reportItemId);
-        if (!source) return sum;
-        sum.actualPaymentCents += Domain.amountForQuantity(source.actualPaymentCents, source.quantity, allocation.quantity);
-        sum.expectedRefundCents += Domain.amountForQuantity(source.expectedRefundCents, source.quantity, allocation.quantity);
-        sum.expectedRebateCents += Domain.amountForQuantity(source.expectedRebateCents, source.quantity, allocation.quantity);
+      const excludeShipmentId = form.elements.id.value || '';
+      const allocations = Domain.allocateFifo(app.state, items, { excludeShipmentId });
+      const financials = Domain.previewShipmentAllocations(app.state, allocations, { excludeShipmentId });
+      const totals = financials.reduce((sum, allocation) => {
+        sum.actualPaymentCents += allocation.actualPaymentCents;
+        sum.expectedRefundCents += allocation.expectedRefundCents;
+        sum.expectedRebateCents += allocation.expectedRebateCents;
         return sum;
       }, { actualPaymentCents: 0, expectedRefundCents: 0, expectedRebateCents: 0 });
       output.className = 'info-box shipment-financial-preview';
@@ -890,7 +1457,31 @@
       source: 'local',
       state: app.state,
       queue: app.queue,
+      lastServerId: app.lastServerId,
+      lastServerVersion: app.lastServerVersion,
     });
+  }
+
+  function recoveryExport() {
+    const recoveryRaws = currentRecoveryRaws();
+    if (!recoveryRaws.length) {
+      toast('没有需要导出的原始恢复数据', true);
+      return;
+    }
+    const multiple = recoveryRaws.length > 1;
+    app.exportText = multiple
+      ? JSON.stringify({
+        format: 'order-report-recovery-bundle-v1',
+        exportedAt: new Date().toISOString(),
+        copyCount: recoveryRaws.length,
+        copies: recoveryRaws.map((raw, index) => ({ number: index + 1, raw })),
+      }, null, 2)
+      : recoveryRaws[0];
+    app.exportFilename = multiple
+      ? `order-report-recovery-bundle-${new Date().toISOString().slice(0, 10)}.json`
+      : `order-report-recovery-${new Date().toISOString().slice(0, 10)}.json`;
+    const title = multiple ? `导出 ${recoveryRaws.length} 份原始恢复数据` : '导出原始恢复数据';
+    openModal(title, `<textarea class="export-preview" readonly aria-label="${multiple ? '原始恢复数据包' : '原始恢复数据'}">${esc(app.exportText)}</textarea><div class="export-actions"><button class="button button-quiet" type="button" data-action="copy-export">复制${multiple ? '恢复数据包' : '原始数据'}</button><button class="button" type="button" data-action="save-export">保存${multiple ? '恢复数据包' : '原始文件'}</button></div>`);
   }
 
   async function serverExport() {
@@ -923,8 +1514,14 @@
       testConnection();
     } else if (action === 'sync-upload') {
       uploadData();
+    } else if (action === 'sync-bind-upload') {
+      bindCurrentServerAndUpload();
     } else if (action === 'sync-download') {
       downloadData();
+    } else if (action === 'retry-failed') {
+      retryFailedOperation(target.dataset.id);
+    } else if (action === 'discard-failed') {
+      confirmAction('安全丢弃失败操作', '将先从已绑定的同一服务器拉取权威数据，再按顺序重放其余本机操作。只有全部成功才会丢弃这一条；离线、服务器不符或重放失败都会保持本机数据不变。是否继续？', () => discardFailedOperation(target.dataset.id));
     } else if (action === 'open-settings') {
       navigateView('settings');
     } else if (action === 'new-report') reportEditor();
@@ -969,6 +1566,7 @@
         updateShipmentFinancialPreview($('form[data-form="shipment"]'));
       } else toast('至少保留一个商品行', true);
     } else if (action === 'export-local') localExport();
+    else if (action === 'export-recovery') recoveryExport();
     else if (action === 'export-server') serverExport();
     else if (action === 'copy-export') copyText(app.exportText, '导出数据已复制');
     else if (action === 'save-export') saveExportFile();
@@ -1011,17 +1609,26 @@
         const payload = { refund: { id: form.elements.id.value || Domain.makeId('refund'), reportItemId: form.elements.reportItemId.value, quantity: Number(form.elements.quantity.value), refundedAt: form.elements.refundedAt.value, note: form.elements.note.value.trim() } };
         dispatch(form.elements.id.value ? 'refund.update' : 'refund.create', payload);
       } else if (form.dataset.form === 'settings') {
-        if (app.syncPromise) {
-          toast('同步操作进行中，请稍后再保存连接设置', true);
-          return;
-        }
         const nextSettings = settingsFromForm();
-        if (nextSettings.apiBase !== app.settings.apiBase || nextSettings.token !== app.settings.token) app.hasSynced = false;
-        app.settings = nextSettings;
-        app.syncError = '';
-        localStorageWrite();
-        render();
-        toast('连接设置已保存');
+        const baseChanged = normalizeApiBase(nextSettings.apiBase) !== normalizeApiBase(app.settings.apiBase);
+        const firstConnection = !app.lastServerId && !app.hasSynced
+          && !app.requiresExplicitDownload && !app.recoveryRaw;
+        if (baseChanged && app.queue.length && !firstConnection) {
+          const { pending, failed } = queueCounts();
+          confirmAction('切换同步服务器', `本机还有 ${pending} 条待上传、${failed} 条失败操作。保存新地址后普通同步会暂停；只有再次确认“下载并覆盖”才会清空这些操作。是否保存新连接？`, () => {
+            try {
+              saveSettings(nextSettings, { allowQueuedServerChange: true });
+              render();
+              toast('新连接已保存；请确认下载并覆盖后再同步');
+            } catch (error) {
+              toast(error.message, true);
+            }
+          });
+        } else {
+          saveSettings(nextSettings);
+          render();
+          toast('连接设置已保存');
+        }
       }
     } catch (error) { toast(error.message, true); }
   });
@@ -1033,4 +1640,15 @@
   if ('serviceWorker' in navigator && /^https?:$/.test(location.protocol)) navigator.serviceWorker.register('sw.js').catch(() => {});
   sync();
   window.addEventListener('online', sync);
+  window.addEventListener('storage', (event) => {
+    if (event.key !== STORAGE_KEY && event.key !== null) return;
+    if (app.syncPromise) {
+      app.storageRefreshPending = true;
+      app.syncRequested = true;
+      return;
+    }
+    const result = applyStorageRefresh();
+    if (result === 'adopted') toast('已接收另一页面保存的本机数据');
+    else if (result === 'conflict') toast('检测到页面间保存冲突；两份数据均已保留', true);
+  });
 })();

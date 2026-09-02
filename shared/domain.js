@@ -23,9 +23,120 @@
 
   function isStateSnapshot(value) {
     if (!value || typeof value !== 'object' || value.schemaVersion !== SCHEMA_VERSION) return false;
-    return ['reports', 'reportItems', 'shipments', 'shipmentItems', 'settlements', 'refunds']
-      .every((key) => Array.isArray(value[key])
-        && value[key].every((row) => row && typeof row === 'object' && !Array.isArray(row)));
+    const collections = ['reports', 'reportItems', 'shipments', 'shipmentItems', 'settlements', 'refunds'];
+    if (!collections.every((key) => Array.isArray(value[key])
+      && value[key].every((row) => row && typeof row === 'object' && !Array.isArray(row)))) return false;
+
+    const string = (input, allowEmpty = false) => typeof input === 'string' && (allowEmpty || Boolean(input.trim()));
+    const optionalString = (input) => input === undefined || input === null || string(input, true);
+    const integer = (input, positive = false) => Number.isSafeInteger(input) && input >= (positive ? 1 : 0);
+    const status = (input) => input === 'active' || input === 'void';
+    const timestamps = (row, updated = true) => string(row.createdAt)
+      && (!updated || string(row.updatedAt));
+
+    if (!value.reports.every((row) => string(row.id)
+      && string(row.occurredAt)
+      && string(row.originalMessage, true)
+      && timestamps(row)
+      && status(row.status))) return false;
+    if (!value.reportItems.every((row) => string(row.id)
+      && string(row.reportId)
+      && string(row.productName)
+      && optionalString(row.note)
+      && integer(row.quantity, true)
+      && integer(row.actualPaymentCents)
+      && integer(row.expectedRefundCents)
+      && integer(row.expectedRebateCents)
+      && timestamps(row)
+      && status(row.status))) return false;
+    if (!value.shipments.every((row) => string(row.id)
+      && string(row.trackingNumber)
+      && integer(row.shippingCostCents)
+      && string(row.shippedAt)
+      && optionalString(row.note)
+      && optionalString(row.closedAt)
+      && timestamps(row)
+      && status(row.status))) return false;
+    if (!value.shipmentItems.every((row) => string(row.id)
+      && string(row.shipmentId)
+      && string(row.reportItemId)
+      && integer(row.quantity, true)
+      && timestamps(row, false)
+      && status(row.status))) return false;
+    if (!value.settlements.every((row) => string(row.id)
+      && string(row.shipmentId)
+      && integer(row.amountCents)
+      && string(row.settledAt)
+      && optionalString(row.note)
+      && timestamps(row)
+      && status(row.status))) return false;
+    if (!value.refunds.every((row) => string(row.id)
+      && string(row.reportItemId)
+      && integer(row.quantity, true)
+      && integer(row.amountCents)
+      && string(row.refundedAt)
+      && optionalString(row.note)
+      && timestamps(row)
+      && status(row.status))) return false;
+    if (collections.some((key) => value[key].some((row) => row.status === 'active' && row.deletedAt))) return false;
+
+    const idsByCollection = new Map();
+    for (const key of collections) {
+      const ids = new Set(value[key].map((row) => row.id));
+      if (ids.size !== value[key].length) return false;
+      idsByCollection.set(key, ids);
+    }
+    const reportIds = idsByCollection.get('reports');
+    const reportItemIds = idsByCollection.get('reportItems');
+    const shipmentIds = idsByCollection.get('shipments');
+    if (!value.reportItems.every((row) => reportIds.has(row.reportId))) return false;
+    if (!value.shipmentItems.every((row) => shipmentIds.has(row.shipmentId) && reportItemIds.has(row.reportItemId))) return false;
+    if (!value.settlements.every((row) => shipmentIds.has(row.shipmentId))) return false;
+    if (!value.refunds.every((row) => reportItemIds.has(row.reportItemId))) return false;
+
+    const activeReportIds = new Set(value.reports.filter(isActive).map((row) => row.id));
+    const activeReportItemIds = new Set(value.reportItems
+      .filter((row) => isActive(row) && activeReportIds.has(row.reportId))
+      .map((row) => row.id));
+    const activeShipmentIds = new Set(value.shipments.filter(isActive).map((row) => row.id));
+    if (!value.reportItems.every((row) => !isActive(row) || activeReportIds.has(row.reportId))) return false;
+    if (!value.shipmentItems.every((row) => !isActive(row)
+      || (activeShipmentIds.has(row.shipmentId) && activeReportItemIds.has(row.reportItemId)))) return false;
+    if (!value.settlements.every((row) => !isActive(row) || activeShipmentIds.has(row.shipmentId))) return false;
+    if (!value.refunds.every((row) => !isActive(row) || activeReportItemIds.has(row.reportItemId))) return false;
+
+    const reportsWithActiveItems = new Set(value.reportItems.filter(isActive).map((row) => row.reportId));
+    if (![...activeReportIds].every((id) => reportsWithActiveItems.has(id))) return false;
+    const shipmentsWithActiveItems = new Set(value.shipmentItems.filter(isActive).map((row) => row.shipmentId));
+    if (![...activeShipmentIds].every((id) => shipmentsWithActiveItems.has(id))) return false;
+    const shipmentsWithActiveSettlements = new Set(value.settlements.filter(isActive).map((row) => row.shipmentId));
+    if (!value.shipments.every((row) => !isActive(row) || !row.closedAt
+      || shipmentsWithActiveSettlements.has(row.id))) return false;
+    if (value.shipments.some((row) => !isActive(row) && row.closedAt)) return false;
+
+    const usedQuantity = new Map();
+    for (const allocation of value.shipmentItems.filter((row) => isActive(row) && activeShipmentIds.has(row.shipmentId))) {
+      usedQuantity.set(allocation.reportItemId, (usedQuantity.get(allocation.reportItemId) || 0) + allocation.quantity);
+    }
+    for (const refund of value.refunds.filter(isActive)) {
+      usedQuantity.set(refund.reportItemId, (usedQuantity.get(refund.reportItemId) || 0) + refund.quantity);
+    }
+    if (!value.reportItems.every((item) => (usedQuantity.get(item.id) || 0) <= item.quantity)) return false;
+
+    for (const item of value.reportItems.filter((row) => activeReportItemIds.has(row.id))) {
+      const refunds = value.refunds
+        .filter((row) => isActive(row) && row.reportItemId === item.id)
+        .sort((a, b) => refundSortKey(a).localeCompare(refundSortKey(b)));
+      let cumulativeQuantity = 0;
+      let cumulativeAmount = 0;
+      for (const refund of refunds) {
+        cumulativeQuantity += refund.quantity;
+        const targetAmount = amountForQuantity(item.actualPaymentCents, item.quantity, cumulativeQuantity);
+        if (refund.amountCents !== targetAmount - cumulativeAmount) return false;
+        cumulativeAmount = targetAmount;
+      }
+    }
+    return true;
   }
 
   function clone(value) {
@@ -72,8 +183,8 @@
 
   function asNonNegativeInt(value, field) {
     const number = Number(value);
-    if (!Number.isInteger(number) || number < 0) {
-      throw new Error(`${field} 必须是非负整数`);
+    if (!Number.isSafeInteger(number) || number < 0) {
+      throw new Error(`${field} 必须是非负整数且不能超过安全整数范围`);
     }
     return number;
   }
@@ -85,16 +196,20 @@
   }
 
   function parseMoney(value, field) {
-    if (typeof value === 'number' && Number.isInteger(value)) {
-      if (value < 0) throw new Error(`${field} 必须是非负金额，最多两位小数`);
+    if (typeof value === 'number' && Number.isSafeInteger(value)) {
+      if (value < 0) throw new Error(`${field} 必须是非负金额，最多两位小数且不能超过安全整数范围`);
       return value;
     }
     const text = String(value ?? '').trim();
     if (!/^\d+(?:\.\d{1,2})?$/.test(text)) {
-      throw new Error(`${field} 必须是非负金额，最多两位小数`);
+      throw new Error(`${field} 必须是非负金额，最多两位小数且不能超过安全整数范围`);
     }
     const [yuan, fraction = ''] = text.split('.');
-    return Number(yuan) * 100 + Number((fraction + '00').slice(0, 2));
+    const cents = Number(`${yuan}${(fraction + '00').slice(0, 2)}`);
+    if (!Number.isSafeInteger(cents)) {
+      throw new Error(`${field} 必须是非负金额，最多两位小数且不能超过安全整数范围`);
+    }
+    return cents;
   }
 
   function formatMoney(cents) {
@@ -103,8 +218,26 @@
   }
 
   function amountForQuantity(totalCents, totalQuantity, quantity) {
-    if (!totalQuantity || !quantity) return 0;
-    return Math.round(Number(totalCents || 0) * Number(quantity) / Number(totalQuantity));
+    const cents = asNonNegativeInt(totalCents ?? 0, '分摊总金额');
+    const total = asNonNegativeInt(totalQuantity ?? 0, '分摊总数量');
+    const count = asNonNegativeInt(quantity ?? 0, '分摊数量');
+    if (count > total) throw new Error('分摊数量不能超过总数量');
+    if (!total || !count || !cents) return 0;
+    const denominator = BigInt(total);
+    const rounded = (BigInt(cents) * BigInt(count) + denominator / BigInt(2)) / denominator;
+    return Number(rounded);
+  }
+
+  function amountForTailQuantity(totalCents, totalQuantity, quantityBefore, quantity) {
+    // Refunds consume the rounded prefix of a lot. Shipments consume its suffix,
+    // leaving inventory in the middle so all three parts always conserve cents.
+    const total = Number(totalQuantity || 0);
+    const before = Number(quantityBefore || 0);
+    const count = Number(quantity || 0);
+    if (!total || !count) return 0;
+    const upper = Math.max(total - before, 0);
+    const lower = Math.max(upper - count, 0);
+    return amountForQuantity(totalCents, total, upper) - amountForQuantity(totalCents, total, lower);
   }
 
   function text(value, field, required = true) {
@@ -143,6 +276,11 @@
     return state.reportItems.filter((row) => row.reportId === reportId && isActive(row));
   }
 
+  function itemHasReferences(state, reportItemId) {
+    return state.shipmentItems.some((row) => row.reportItemId === reportItemId)
+      || state.refunds.some((row) => row.reportItemId === reportItemId);
+  }
+
   function shipmentItemQuantity(state, reportItemId, excludeShipmentId) {
     return state.shipmentItems
       .filter((row) => row.reportItemId === reportItemId && isActive(row) && isActive(shipmentById(state, row.shipmentId)) && row.shipmentId !== excludeShipmentId)
@@ -175,13 +313,94 @@
       .reduce((sum, row) => sum + Number(row.quantity || 0), 0);
   }
 
+  function allocationFinancialValues(source, quantityBefore, quantity) {
+    if (!source) {
+      return { actualPaymentCents: 0, expectedRefundCents: 0, expectedRebateCents: 0 };
+    }
+    return {
+      actualPaymentCents: amountForTailQuantity(source.actualPaymentCents, source.quantity, quantityBefore, quantity),
+      expectedRefundCents: amountForTailQuantity(source.expectedRefundCents, source.quantity, quantityBefore, quantity),
+      expectedRebateCents: amountForTailQuantity(source.expectedRebateCents, source.quantity, quantityBefore, quantity),
+    };
+  }
+
+  function activeShipmentAllocations(state, excludeShipmentId = '') {
+    // Shipment updates replace allocation rows, so use the stable parent order
+    // instead of allocation insertion order when assigning rounding remainders.
+    const shipmentOrder = new Map(state.shipments.map((shipment, index) => [shipment.id, index]));
+    const allocationOrder = new Map(state.shipmentItems.map((allocation, index) => [allocation.id, index]));
+    const activeShipmentIds = new Set(state.shipments.filter(isActive).map((shipment) => shipment.id));
+    return state.shipmentItems.filter((allocation) => isActive(allocation)
+      && activeShipmentIds.has(allocation.shipmentId)
+      && allocation.shipmentId !== excludeShipmentId)
+      .sort((left, right) => (shipmentOrder.get(left.shipmentId) - shipmentOrder.get(right.shipmentId))
+        || (allocationOrder.get(left.id) - allocationOrder.get(right.id)));
+  }
+
+  function shipmentAllocationFinancialMap(state) {
+    const shippedByItem = new Map();
+    const valuesByAllocation = new Map();
+    for (const allocation of activeShipmentAllocations(state)) {
+      const source = itemById(state, allocation.reportItemId);
+      const quantityBefore = shippedByItem.get(allocation.reportItemId) || 0;
+      valuesByAllocation.set(allocation.id, allocationFinancialValues(source, quantityBefore, allocation.quantity));
+      shippedByItem.set(allocation.reportItemId, quantityBefore + Number(allocation.quantity || 0));
+    }
+    return valuesByAllocation;
+  }
+
+  function previewShipmentAllocations(state, allocations, options = {}) {
+    const excludeShipmentId = options.excludeShipmentId || '';
+    const shipmentOrder = new Map(state.shipments.map((shipment, index) => [shipment.id, index]));
+    const targetOrder = shipmentOrder.has(excludeShipmentId)
+      ? shipmentOrder.get(excludeShipmentId)
+      : state.shipments.length;
+    const shippedByItem = new Map();
+    const reservedByItem = new Map();
+    for (const allocation of activeShipmentAllocations(state, excludeShipmentId)) {
+      const quantity = Number(allocation.quantity || 0);
+      reservedByItem.set(allocation.reportItemId, (reservedByItem.get(allocation.reportItemId) || 0) + quantity);
+      if (shipmentOrder.get(allocation.shipmentId) < targetOrder) {
+        shippedByItem.set(allocation.reportItemId, (shippedByItem.get(allocation.reportItemId) || 0) + quantity);
+      }
+    }
+    const requestedByItem = new Map();
+    return (Array.isArray(allocations) ? allocations : []).map((allocation) => {
+      const source = itemById(state, allocation.reportItemId);
+      if (!source) throw new Error('快递商品关联的库存批次不存在');
+      const quantity = asPositiveInt(allocation.quantity, '快递商品数量');
+      const requestedBefore = requestedByItem.get(allocation.reportItemId) || 0;
+      if ((reservedByItem.get(allocation.reportItemId) || 0) + requestedBefore + quantity
+        + refundQuantity(state, allocation.reportItemId) > source.quantity) {
+        throw new Error(`${source.productName} 剩余库存不足`);
+      }
+      const quantityBefore = (shippedByItem.get(allocation.reportItemId) || 0) + requestedBefore;
+      requestedByItem.set(allocation.reportItemId, requestedBefore + quantity);
+      return { ...allocation, ...allocationFinancialValues(source, quantityBefore, quantity) };
+    });
+  }
+
   function inventoryLots(state, options = {}) {
     const excludeShipmentId = options.excludeShipmentId || null;
+    const allocationValues = shipmentAllocationFinancialMap(state);
+    const shippedValuesByItem = new Map();
+    for (const allocation of activeShipmentAllocations(state)) {
+      if (allocation.shipmentId === excludeShipmentId) continue;
+      const values = allocationValues.get(allocation.id);
+      const current = shippedValuesByItem.get(allocation.reportItemId)
+        || { actualPaymentCents: 0, expectedRefundCents: 0, expectedRebateCents: 0 };
+      current.actualPaymentCents += Number(values?.actualPaymentCents || 0);
+      current.expectedRefundCents += Number(values?.expectedRefundCents || 0);
+      current.expectedRebateCents += Number(values?.expectedRebateCents || 0);
+      shippedValuesByItem.set(allocation.reportItemId, current);
+    }
     return state.reportItems
       .filter((item) => isActive(item) && isActive(reportById(state, item.reportId)))
       .map((item) => {
         const shipped = shipmentItemQuantity(state, item.id, excludeShipmentId);
         const refunded = refundQuantity(state, item.id);
+        const shippedValues = shippedValuesByItem.get(item.id)
+          || { actualPaymentCents: 0, expectedRefundCents: 0, expectedRebateCents: 0 };
         return {
           reportItemId: item.id,
           reportId: item.reportId,
@@ -195,6 +414,15 @@
           actualPaymentCents: Number(item.actualPaymentCents || 0),
           expectedRefundCents: Number(item.expectedRefundCents || 0),
           expectedRebateCents: Number(item.expectedRebateCents || 0),
+          availableActualPaymentCents: Math.max(Number(item.actualPaymentCents || 0)
+            - amountForQuantity(item.actualPaymentCents, item.quantity, refunded)
+            - shippedValues.actualPaymentCents, 0),
+          availableExpectedRefundCents: Math.max(Number(item.expectedRefundCents || 0)
+            - amountForQuantity(item.expectedRefundCents, item.quantity, refunded)
+            - shippedValues.expectedRefundCents, 0),
+          availableExpectedRebateCents: Math.max(Number(item.expectedRebateCents || 0)
+            - amountForQuantity(item.expectedRebateCents, item.quantity, refunded)
+            - shippedValues.expectedRebateCents, 0),
         };
       })
       .filter((row) => row.availableQuantity > 0)
@@ -285,7 +513,7 @@
     if (!report) throw new Error('报单不存在');
     const incomingItems = (payload.items || []).map((item) => validateItemPayload(item, idFactory));
     if (!incomingItems.length) throw new Error('报单至少需要一个商品');
-    const existingItems = reportItems(state, report.id);
+    const allExistingItems = state.reportItems.filter((item) => item.reportId === report.id);
     const incomingIds = new Set(incomingItems.map((item) => item.id));
     if (incomingIds.size !== incomingItems.length) throw new Error('商品编号不能重复');
     for (const item of incomingItems) {
@@ -294,17 +522,18 @@
       if (!existing && state.reportItems.some((row) => row.id === item.id)) throw new Error('商品编号已存在');
     }
     const occurredAt = text(input.occurredAt, '报单时间');
-    const reportHasUsedItems = existingItems.some((item) => shipmentItemQuantity(state, item.id) || refundQuantity(state, item.id));
-    if (reportHasUsedItems && occurredAt !== report.occurredAt) {
+    const reportHasReferencedItems = allExistingItems.some((item) => itemHasReferences(state, item.id));
+    if (reportHasReferencedItems && occurredAt !== report.occurredAt) {
       throw new Error('报单已有出库或退款记录，不能修改报单时间');
     }
-    for (const oldItem of existingItems) {
+    for (const oldItem of allExistingItems) {
       const used = shipmentItemQuantity(state, oldItem.id) + refundQuantity(state, oldItem.id);
       const incoming = incomingItems.find((item) => item.id === oldItem.id);
-      if (!incomingIds.has(oldItem.id) && used) {
+      const referenced = itemHasReferences(state, oldItem.id);
+      if (isActive(oldItem) && !incomingIds.has(oldItem.id) && used) {
         throw new Error(`商品“${oldItem.productName}”已出库或退款，不能删除`);
       }
-      if (incoming && used && ['productName', 'quantity', 'actualPaymentCents', 'expectedRefundCents', 'expectedRebateCents']
+      if (incoming && referenced && ['productName', 'quantity', 'actualPaymentCents', 'expectedRefundCents', 'expectedRebateCents']
         .some((field) => incoming[field] !== oldItem[field])) {
         throw new Error(`商品“${oldItem.productName}”已有出库或退款记录，不能修改名称、数量或金额`);
       }
@@ -314,7 +543,13 @@
       originalMessage: text(input.originalMessage, '原消息文本', false),
       updatedAt: now,
     });
-    state.reportItems = state.reportItems.filter((item) => item.reportId !== report.id || incomingIds.has(item.id));
+    state.reportItems = state.reportItems.filter((item) => {
+      if (item.reportId !== report.id || incomingIds.has(item.id)) return true;
+      if (!itemHasReferences(state, item.id)) return false;
+      item.status = 'void';
+      item.updatedAt = now;
+      return true;
+    });
     for (const item of incomingItems) {
       const old = state.reportItems.find((row) => row.id === item.id);
       const used = shipmentItemQuantity(state, item.id) + refundQuantity(state, item.id);
@@ -346,13 +581,14 @@
 
   function normalizeShipment(raw, idFactory, now) {
     const input = raw || {};
+    if (input.closedAt) throw new Error('快递结单状态只能通过结单操作修改');
     return {
       id: input.id || idFactory('shipment'),
       trackingNumber: text(input.trackingNumber, '快递单号'),
       shippingCostCents: parseMoney(input.shippingCostCents ?? 0, '快递价格'),
       shippedAt: text(input.shippedAt, '发出时间'),
       note: text(input.note, '备注', false),
-      closedAt: input.closedAt || null,
+      closedAt: null,
       createdAt: input.createdAt || now,
       updatedAt: now,
       status: 'active',
@@ -549,23 +785,26 @@
     const now = options.now || isoNow();
     const idFactory = options.idFactory || makeId;
     if (!operation || !operation.type) throw new Error('同步操作缺少类型');
+    let applied;
     switch (operation.type) {
-      case 'report.create': return addReport(state, operation.payload || {}, now, idFactory);
-      case 'report.update': return updateReport(state, operation.payload || {}, now, idFactory);
-      case 'report.void': return voidReport(state, operation.payload || {}, now);
-      case 'shipment.create': return addShipment(state, operation.payload || {}, now, idFactory);
-      case 'shipment.update': return updateShipment(state, operation.payload || {}, now, idFactory);
-      case 'shipment.void': return voidShipment(state, operation.payload || {}, now);
-      case 'shipment.close': return closeShipment(state, operation.payload || {}, now);
-      case 'shipment.reopen': return reopenShipment(state, operation.payload || {}, now);
-      case 'settlement.create': return addSettlement(state, operation.payload || {}, now, idFactory);
-      case 'settlement.update': return updateSettlement(state, operation.payload || {}, now);
-      case 'settlement.void': return voidSettlement(state, operation.payload || {}, now);
-      case 'refund.create': return addRefund(state, operation.payload || {}, now, idFactory);
-      case 'refund.update': return updateRefund(state, operation.payload || {}, now);
-      case 'refund.void': return voidRefund(state, operation.payload || {}, now);
+      case 'report.create': applied = addReport(state, operation.payload || {}, now, idFactory); break;
+      case 'report.update': applied = updateReport(state, operation.payload || {}, now, idFactory); break;
+      case 'report.void': applied = voidReport(state, operation.payload || {}, now); break;
+      case 'shipment.create': applied = addShipment(state, operation.payload || {}, now, idFactory); break;
+      case 'shipment.update': applied = updateShipment(state, operation.payload || {}, now, idFactory); break;
+      case 'shipment.void': applied = voidShipment(state, operation.payload || {}, now); break;
+      case 'shipment.close': applied = closeShipment(state, operation.payload || {}, now); break;
+      case 'shipment.reopen': applied = reopenShipment(state, operation.payload || {}, now); break;
+      case 'settlement.create': applied = addSettlement(state, operation.payload || {}, now, idFactory); break;
+      case 'settlement.update': applied = updateSettlement(state, operation.payload || {}, now); break;
+      case 'settlement.void': applied = voidSettlement(state, operation.payload || {}, now); break;
+      case 'refund.create': applied = addRefund(state, operation.payload || {}, now, idFactory); break;
+      case 'refund.update': applied = updateRefund(state, operation.payload || {}, now); break;
+      case 'refund.void': applied = voidRefund(state, operation.payload || {}, now); break;
       default: throw new Error(`不支持的操作类型: ${operation.type}`);
     }
+    if (!isStateSnapshot(applied.state)) throw new Error('操作产生了无效数据，已拒绝保存');
+    return applied;
   }
 
   function pendingOperationBatch(queue, limit = 100) {
@@ -621,36 +860,38 @@
   function stats(state) {
     const activeReports = new Set(state.reports.filter(isActive).map((row) => row.id));
     const activeShipments = new Map(state.shipments.filter(isActive).map((shipment) => [shipment.id, shipment]));
-    const closedQuantityByItem = new Map();
-    for (const allocation of state.shipmentItems.filter(isActive)) {
-      const shipment = activeShipments.get(allocation.shipmentId);
-      if (!shipment?.closedAt) continue;
-      closedQuantityByItem.set(
-        allocation.reportItemId,
-        (closedQuantityByItem.get(allocation.reportItemId) || 0) + Number(allocation.quantity || 0),
-      );
-    }
-    const totalPurchaseCents = state.reportItems
-      .filter((item) => isActive(item) && activeReports.has(item.reportId))
-      .reduce((sum, item) => {
-        const refunded = refundQuantity(state, item.id);
-        return sum + amountForQuantity(item.actualPaymentCents, item.quantity, item.quantity - refunded);
-      }, 0);
-    const pendingShipmentPurchaseCents = inventoryLots(state)
-      .reduce((sum, lot) => sum + amountForQuantity(lot.actualPaymentCents, lot.quantity, lot.availableQuantity), 0);
+    const activeAllocations = activeShipmentAllocations(state);
+    const allocationValues = shipmentAllocationFinancialMap(state);
     const totalShippingCents = state.shipments
       .filter(isActive)
       .reduce((sum, shipment) => sum + Number(shipment.shippingCostCents || 0), 0);
+    let totalPurchaseCents = 0;
+    let pendingShipmentPurchaseCents = 0;
     let expectedRefundCents = 0;
     let pendingExpectedRefundCents = 0;
     let expectedRebateCents = 0;
     for (const item of state.reportItems.filter((row) => isActive(row) && activeReports.has(row.reportId))) {
       const refunded = refundQuantity(state, item.id);
-      const remaining = item.quantity - refunded;
-      expectedRefundCents += amountForQuantity(item.expectedRefundCents, item.quantity, remaining);
-      const closedQuantity = Math.min(remaining, closedQuantityByItem.get(item.id) || 0);
-      pendingExpectedRefundCents += amountForQuantity(item.expectedRefundCents, item.quantity, remaining - closedQuantity);
-      expectedRebateCents += amountForQuantity(item.expectedRebateCents, item.quantity, remaining);
+      const retainedActual = Number(item.actualPaymentCents || 0)
+        - amountForQuantity(item.actualPaymentCents, item.quantity, refunded);
+      const retainedExpectedRefund = Number(item.expectedRefundCents || 0)
+        - amountForQuantity(item.expectedRefundCents, item.quantity, refunded);
+      const retainedExpectedRebate = Number(item.expectedRebateCents || 0)
+        - amountForQuantity(item.expectedRebateCents, item.quantity, refunded);
+      let shippedActual = 0;
+      let closedExpectedRefund = 0;
+      for (const allocation of activeAllocations.filter((row) => row.reportItemId === item.id)) {
+        const values = allocationValues.get(allocation.id);
+        shippedActual += Number(values?.actualPaymentCents || 0);
+        if (activeShipments.get(allocation.shipmentId)?.closedAt) {
+          closedExpectedRefund += Number(values?.expectedRefundCents || 0);
+        }
+      }
+      totalPurchaseCents += retainedActual;
+      pendingShipmentPurchaseCents += Math.max(retainedActual - shippedActual, 0);
+      expectedRefundCents += retainedExpectedRefund;
+      pendingExpectedRefundCents += Math.max(retainedExpectedRefund - closedExpectedRefund, 0);
+      expectedRebateCents += retainedExpectedRebate;
     }
     const expectedIncomeCents = expectedRefundCents + expectedRebateCents;
     let returnedCents = 0;
@@ -688,17 +929,18 @@
   }
 
   function shipmentView(state, shipment) {
+    const allocationValues = shipmentAllocationFinancialMap(state);
     const items = state.shipmentItems
       .filter((item) => item.shipmentId === shipment.id && isActive(item))
       .map((allocation) => {
         const source = itemById(state, allocation.reportItemId);
+        const values = allocationValues.get(allocation.id)
+          || { actualPaymentCents: 0, expectedRefundCents: 0, expectedRebateCents: 0 };
         return {
           ...allocation,
           productName: source?.productName || '已删除商品',
           productNote: source?.note || '',
-          expectedRefundCents: source ? amountForQuantity(source.expectedRefundCents, source.quantity, allocation.quantity) : 0,
-          expectedRebateCents: source ? amountForQuantity(source.expectedRebateCents, source.quantity, allocation.quantity) : 0,
-          actualPaymentCents: source ? amountForQuantity(source.actualPaymentCents, source.quantity, allocation.quantity) : 0,
+          ...values,
         };
       });
     const settlements = state.settlements.filter((row) => row.shipmentId === shipment.id && isActive(row));
@@ -730,6 +972,7 @@
     parseMoney,
     formatMoney,
     amountForQuantity,
+    previewShipmentAllocations,
     inventoryLots,
     aggregateInventory,
     allocateFifo,

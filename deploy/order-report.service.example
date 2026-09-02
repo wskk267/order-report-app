@@ -5,12 +5,24 @@ Wants=network-online.target
 
 [Service]
 Type=simple
+User=order-report
+Group=order-report
 WorkingDirectory=/mnt/nvme/item/order-report-app
 EnvironmentFile=-/mnt/nvme/item/order-report-app/.env
 ExecStart=/usr/bin/node /mnt/nvme/item/order-report-app/server.js
 Restart=on-failure
 RestartSec=3
 UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+ReadWritePaths=/mnt/nvme/item/order-report-app/runtime
 
 [Install]
 WantedBy=multi-user.target

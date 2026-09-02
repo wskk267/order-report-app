@@ -185,6 +185,25 @@ test('a shipment cannot be closed without an actual settlement', () => {
   assert.throws(() => Domain.applyOperation(state, operation('shipment.close', { id: 's_no_settle' }), { idFactory }), /先登记实际返款/);
 });
 
+test('shipment closed state cannot be injected through create or update payloads', () => {
+  let state = Domain.emptyState();
+  const idFactory = ids();
+  state = Domain.applyOperation(state, operation('report.create', reportPayload('r_lifecycle', '商品生命周期', 2, 100, 100, 0)), { idFactory }).state;
+  assert.throws(() => Domain.applyOperation(state, operation('shipment.create', {
+    shipment: { id: 's_injected', trackingNumber: 'TRACK-INJECTED', shippingCostCents: 0, shippedAt: '2026-08-02', closedAt: '2026-08-03' },
+    items: [{ productName: '商品生命周期', quantity: 1 }],
+  }), { idFactory }), /结单状态只能通过结单操作修改/);
+
+  state = Domain.applyOperation(state, operation('shipment.create', {
+    shipment: { id: 's_open_lifecycle', trackingNumber: 'TRACK-OPEN-LIFECYCLE', shippingCostCents: 0, shippedAt: '2026-08-02' },
+    items: [{ productName: '商品生命周期', quantity: 1 }],
+  }), { idFactory }).state;
+  assert.throws(() => Domain.applyOperation(state, operation('shipment.update', {
+    shipment: { id: 's_open_lifecycle', trackingNumber: 'TRACK-OPEN-LIFECYCLE', shippingCostCents: 0, shippedAt: '2026-08-02', closedAt: '2026-08-03' },
+    items: [{ productName: '商品生命周期', quantity: 1 }],
+  }), { idFactory }), /结单状态只能通过结单操作修改/);
+});
+
 test('used report item financial fields cannot be changed after allocation', () => {
   let state = Domain.emptyState();
   const idFactory = ids();
@@ -218,6 +237,88 @@ test('shipment update releases its old FIFO allocation before reassigning', () =
   assert.equal(state.shipmentItems.filter((item) => item.shipmentId === 's1').reduce((sum, item) => sum + item.quantity, 0), 3);
   assert.equal(Domain.inventoryLots(state).find((row) => row.reportItemId === 'r1_item'), undefined);
   assert.equal(Domain.inventoryLots(state).find((row) => row.reportItemId === 'r2_item').availableQuantity, 1);
+});
+
+test('no-op shipment updates keep deterministic cent ownership and statistics', () => {
+  let state = Domain.emptyState();
+  const idFactory = ids();
+  state = Domain.applyOperation(state, operation('report.create', reportPayload('r_stable_cent', '商品稳定', 3, 100, 100, 100)), { idFactory }).state;
+  for (const [id, date] of [['s_stable_1', '2026-08-02'], ['s_stable_2', '2026-08-03']]) {
+    state = Domain.applyOperation(state, operation('shipment.create', {
+      shipment: { id, trackingNumber: id, shippingCostCents: 0, shippedAt: date },
+      items: [{ productName: '商品稳定', quantity: 1 }],
+    }), { idFactory, now: `${date}T10:00:00.000Z` }).state;
+  }
+  state = Domain.applyOperation(state, operation('settlement.create', {
+    settlement: { id: 'settle_stable', shipmentId: 's_stable_2', amountCents: 34, settledAt: '2026-08-04' },
+  }), { idFactory, now: '2026-08-04T10:00:00.000Z' }).state;
+  state = Domain.applyOperation(state, operation('shipment.close', { id: 's_stable_2' }), {
+    idFactory,
+    now: '2026-08-05T10:00:00.000Z',
+  }).state;
+
+  const valuesBefore = state.shipments.map((shipment) => Domain.shipmentView(state, shipment).actualPaymentCents);
+  const statsBefore = Domain.stats(state);
+  const previewAllocations = Domain.allocateFifo(state, [{ productName: '商品稳定', quantity: 1 }], { excludeShipmentId: 's_stable_1' });
+  assert.equal(Domain.previewShipmentAllocations(state, previewAllocations, { excludeShipmentId: 's_stable_1' })[0].actualPaymentCents, 33);
+
+  state = Domain.applyOperation(state, operation('shipment.update', {
+    shipment: { id: 's_stable_1', trackingNumber: 's_stable_1', shippingCostCents: 0, shippedAt: '2026-08-02' },
+    items: [{ productName: '商品稳定', quantity: 1 }],
+  }), { idFactory, now: '2026-08-06T10:00:00.000Z' }).state;
+  assert.deepEqual(valuesBefore, [33, 34]);
+  assert.deepEqual(state.shipments.map((shipment) => Domain.shipmentView(state, shipment).actualPaymentCents), valuesBefore);
+  assert.deepEqual(Domain.stats(state), statsBefore);
+});
+
+test('void shipment and refund history keeps referenced report items as tombstones', () => {
+  const originalItems = [
+    { id: 'i_history', productName: '历史商品', quantity: 1, actualPaymentCents: 100, expectedRefundCents: 50, expectedRebateCents: 10 },
+    { id: 'i_keep', productName: '保留商品', quantity: 1, actualPaymentCents: 200, expectedRefundCents: 100, expectedRebateCents: 20 },
+  ];
+  const updatePayload = {
+    report: { id: 'r_history', occurredAt: '2026-08-01', originalMessage: '' },
+    items: [originalItems[1]],
+  };
+
+  let shipmentState = Domain.emptyState();
+  const shipmentIds = ids();
+  shipmentState = Domain.applyOperation(shipmentState, operation('report.create', {
+    report: { id: 'r_history', occurredAt: '2026-08-01', originalMessage: '' },
+    items: originalItems,
+  }), { idFactory: shipmentIds, now: '2026-08-01T10:00:00.000Z' }).state;
+  shipmentState = Domain.applyOperation(shipmentState, operation('shipment.create', {
+    shipment: { id: 's_history', trackingNumber: 'TRACK-HISTORY', shippingCostCents: 0, shippedAt: '2026-08-02' },
+    items: [{ productName: '历史商品', quantity: 1 }],
+  }), { idFactory: shipmentIds, now: '2026-08-02T10:00:00.000Z' }).state;
+  shipmentState = Domain.applyOperation(shipmentState, operation('shipment.void', { id: 's_history' }), {
+    idFactory: shipmentIds,
+    now: '2026-08-03T10:00:00.000Z',
+  }).state;
+  assert.throws(() => Domain.applyOperation(shipmentState, operation('report.update', {
+    ...updatePayload,
+    items: [{ ...originalItems[0], actualPaymentCents: 101 }, originalItems[1]],
+  }), { idFactory: shipmentIds }), /不能修改名称、数量或金额/);
+  shipmentState = Domain.applyOperation(shipmentState, operation('report.update', updatePayload), { idFactory: shipmentIds }).state;
+  assert.equal(shipmentState.reportItems.find((item) => item.id === 'i_history').status, 'void');
+  assert.equal(Domain.isStateSnapshot(shipmentState), true);
+
+  let refundState = Domain.emptyState();
+  const refundIds = ids();
+  refundState = Domain.applyOperation(refundState, operation('report.create', {
+    report: { id: 'r_history', occurredAt: '2026-08-01', originalMessage: '' },
+    items: originalItems,
+  }), { idFactory: refundIds, now: '2026-08-01T10:00:00.000Z' }).state;
+  refundState = Domain.applyOperation(refundState, operation('refund.create', {
+    refund: { id: 'f_history', reportItemId: 'i_history', quantity: 1, refundedAt: '2026-08-02' },
+  }), { idFactory: refundIds, now: '2026-08-02T10:00:00.000Z' }).state;
+  refundState = Domain.applyOperation(refundState, operation('refund.void', { id: 'f_history' }), {
+    idFactory: refundIds,
+    now: '2026-08-03T10:00:00.000Z',
+  }).state;
+  refundState = Domain.applyOperation(refundState, operation('report.update', updatePayload), { idFactory: refundIds }).state;
+  assert.equal(refundState.reportItems.find((item) => item.id === 'i_history').status, 'void');
+  assert.equal(Domain.isStateSnapshot(refundState), true);
 });
 
 test('shipment view carries item notes for printed slips', () => {
@@ -302,6 +403,38 @@ test('numeric negative money is rejected', () => {
   assert.throws(() => Domain.parseMoney(-1, '金额'), /非负金额/);
 });
 
+test('unsafe integer inputs are rejected and large proportional allocations stay exact', () => {
+  const maximum = Number.MAX_SAFE_INTEGER;
+  assert.equal(Domain.parseMoney('90071992547409.91', '金额'), maximum);
+  assert.throws(() => Domain.parseMoney(maximum + 1, '金额'), /安全整数范围/);
+  assert.throws(() => Domain.parseMoney('90071992547409.92', '金额'), /安全整数范围/);
+  assert.throws(() => Domain.applyOperation(
+    Domain.emptyState(),
+    operation('report.create', reportPayload('r_unsafe', '商品超限', maximum + 1, 1, 1, 1)),
+    { idFactory: ids() },
+  ), /安全整数范围/);
+
+  const totalCents = 6912341670100991;
+  const totalQuantity = 5804638223728639;
+  const refundedQuantity = 2292638615373818;
+  assert.equal(Domain.amountForQuantity(totalCents, totalQuantity, refundedQuantity), 2730144554185731);
+
+  const idFactory = ids();
+  let state = Domain.applyOperation(Domain.emptyState(), operation('report.create', reportPayload(
+    'r_large', '商品大数', totalQuantity, totalCents, 0, 0,
+  )), { idFactory, now: '2026-08-01T10:00:00.000Z' }).state;
+  state = Domain.applyOperation(state, operation('refund.create', {
+    refund: { id: 'refund_large', reportItemId: 'r_large_item', quantity: refundedQuantity, refundedAt: '2026-08-02' },
+  }), { idFactory, now: '2026-08-02T10:00:00.000Z' }).state;
+  const remainingQuantity = totalQuantity - refundedQuantity;
+  const [remaining] = Domain.previewShipmentAllocations(state, [{
+    reportItemId: 'r_large_item',
+    quantity: remainingQuantity,
+  }]);
+  assert.equal(state.refunds[0].amountCents, 2730144554185731);
+  assert.equal(state.refunds[0].amountCents + remaining.actualPaymentCents, totalCents);
+});
+
 test('normalization releases allocations and returns attached to a void shipment', () => {
   const state = Domain.normalizeState({
     reports: [{ id: 'r_orphan', occurredAt: '2026-08-01', status: 'active' }],
@@ -352,4 +485,185 @@ test('server state snapshots must contain every state collection', () => {
   assert.equal(Domain.isStateSnapshot({ ...Domain.emptyState(), schemaVersion: '1' }), false);
   assert.equal(Domain.isStateSnapshot({ ...Domain.emptyState(), settlements: null }), false);
   assert.equal(Domain.isStateSnapshot({ ...Domain.emptyState(), reportItems: [null] }), false);
+  assert.equal(Domain.isStateSnapshot({ ...Domain.emptyState(), reportItems: [{}] }), false);
+
+  const idFactory = ids();
+  let state = Domain.applyOperation(
+    Domain.emptyState(),
+    operation('report.create', reportPayload('r_valid', '商品P', 2, 100, 50, 10)),
+    { idFactory, now: '2026-08-01T11:00:00.000Z' },
+  ).state;
+  assert.equal(Domain.isStateSnapshot(state), true);
+
+  const duplicate = Domain.clone(state);
+  duplicate.reportItems.push(Domain.clone(duplicate.reportItems[0]));
+  assert.equal(Domain.isStateSnapshot(duplicate), false);
+
+  const dangling = Domain.clone(state);
+  dangling.reportItems[0].reportId = 'missing_report';
+  assert.equal(Domain.isStateSnapshot(dangling), false);
+
+  const invalidMoney = Domain.clone(state);
+  invalidMoney.reportItems[0].actualPaymentCents = -1;
+  assert.equal(Domain.isStateSnapshot(invalidMoney), false);
+
+  const activeItemUnderVoidReport = Domain.clone(state);
+  activeItemUnderVoidReport.reports[0].status = 'void';
+  assert.equal(Domain.isStateSnapshot(activeItemUnderVoidReport), false);
+
+  const activeStatusWithDeletedAt = Domain.clone(state);
+  activeStatusWithDeletedAt.reports[0].deletedAt = '2026-08-02T11:00:00.000Z';
+  assert.equal(Domain.isStateSnapshot(activeStatusWithDeletedAt), false);
+
+  const reportWithoutActiveItems = Domain.clone(state);
+  reportWithoutActiveItems.reportItems[0].status = 'void';
+  assert.equal(Domain.isStateSnapshot(reportWithoutActiveItems), false);
+
+  const validRefundState = Domain.applyOperation(state, operation('refund.create', {
+    refund: { id: 'refund_valid', reportItemId: 'r_valid_item', quantity: 1, refundedAt: '2026-08-02' },
+  }), { idFactory, now: '2026-08-02T10:00:00.000Z' }).state;
+  assert.equal(Domain.isStateSnapshot(validRefundState), true);
+  const wrongRefundAmount = Domain.clone(validRefundState);
+  wrongRefundAmount.refunds[0].amountCents += 1;
+  assert.equal(Domain.isStateSnapshot(wrongRefundAmount), false);
+  const activeRefundUnderVoidItem = Domain.clone(validRefundState);
+  activeRefundUnderVoidItem.reportItems[0].status = 'void';
+  assert.equal(Domain.isStateSnapshot(activeRefundUnderVoidItem), false);
+
+  state = Domain.applyOperation(state, operation('shipment.create', {
+    shipment: { id: 's_valid', trackingNumber: 'TRACK-VALID', shippingCostCents: 0, shippedAt: '2026-08-02' },
+    items: [{ productName: '商品P', quantity: 2 }],
+  }), { idFactory, now: '2026-08-02T11:00:00.000Z' }).state;
+  const overAllocated = Domain.clone(state);
+  overAllocated.refunds.push({
+    id: 'refund_over',
+    reportItemId: 'r_valid_item',
+    quantity: 1,
+    amountCents: 50,
+    refundedAt: '2026-08-03',
+    note: '',
+    createdAt: '2026-08-03T11:00:00.000Z',
+    updatedAt: '2026-08-03T11:00:00.000Z',
+    status: 'active',
+  });
+  assert.equal(Domain.isStateSnapshot(overAllocated), false);
+
+  const activeAllocationUnderVoidShipment = Domain.clone(state);
+  activeAllocationUnderVoidShipment.shipments[0].status = 'void';
+  assert.equal(Domain.isStateSnapshot(activeAllocationUnderVoidShipment), false);
+
+  const shipmentWithoutActiveItems = Domain.clone(state);
+  shipmentWithoutActiveItems.shipmentItems[0].status = 'void';
+  assert.equal(Domain.isStateSnapshot(shipmentWithoutActiveItems), false);
+
+  const closedWithoutSettlement = Domain.clone(state);
+  closedWithoutSettlement.shipments[0].closedAt = '2026-08-03T11:00:00.000Z';
+  assert.equal(Domain.isStateSnapshot(closedWithoutSettlement), false);
+
+  let closedState = Domain.applyOperation(state, operation('settlement.create', {
+    settlement: { id: 'settlement_valid', shipmentId: 's_valid', amountCents: 0, settledAt: '2026-08-03' },
+  }), { idFactory, now: '2026-08-03T11:00:00.000Z' }).state;
+  closedState = Domain.applyOperation(closedState, operation('shipment.close', { id: 's_valid' }), {
+    idFactory,
+    now: '2026-08-04T11:00:00.000Z',
+  }).state;
+  assert.equal(Domain.isStateSnapshot(closedState), true);
+
+  const activeSettlementUnderVoidShipment = Domain.clone(closedState);
+  activeSettlementUnderVoidShipment.shipments[0].status = 'void';
+  activeSettlementUnderVoidShipment.shipments[0].closedAt = null;
+  activeSettlementUnderVoidShipment.shipmentItems[0].status = 'void';
+  assert.equal(Domain.isStateSnapshot(activeSettlementUnderVoidShipment), false);
+
+  const closedVoidShipment = Domain.clone(closedState);
+  closedVoidShipment.shipments[0].status = 'void';
+  closedVoidShipment.shipmentItems[0].status = 'void';
+  closedVoidShipment.settlements[0].status = 'void';
+  assert.equal(Domain.isStateSnapshot(closedVoidShipment), false);
+});
+
+test('shipment, inventory and refund allocations conserve every cent', () => {
+  let state = Domain.emptyState();
+  const idFactory = ids();
+  state = Domain.applyOperation(state, operation('report.create', reportPayload('r_cent', '商品Q', 2, 1, 1, 1)), {
+    idFactory,
+    now: '2026-08-01T11:00:00.000Z',
+  }).state;
+
+  const firstAllocations = Domain.allocateFifo(state, [{ productName: '商品Q', quantity: 1 }]);
+  const firstPreview = Domain.previewShipmentAllocations(state, firstAllocations);
+  assert.deepEqual(firstPreview.map((row) => [row.actualPaymentCents, row.expectedRefundCents, row.expectedRebateCents]), [[0, 0, 0]]);
+
+  state = Domain.applyOperation(state, operation('shipment.create', {
+    shipment: { id: 's_cent_1', trackingNumber: 'TRACK-CENT-1', shippingCostCents: 0, shippedAt: '2026-08-02' },
+    items: [{ productName: '商品Q', quantity: 1 }],
+  }), { idFactory, now: '2026-08-02T11:00:00.000Z' }).state;
+  let summary = Domain.stats(state);
+  assert.equal(Domain.shipmentView(state, state.shipments[0]).actualPaymentCents, 0);
+  assert.equal(summary.totalPurchaseCents, 1);
+  assert.equal(summary.pendingShipmentPurchaseCents, 1);
+
+  state = Domain.applyOperation(state, operation('shipment.create', {
+    shipment: { id: 's_cent_2', trackingNumber: 'TRACK-CENT-2', shippingCostCents: 0, shippedAt: '2026-08-03' },
+    items: [{ productName: '商品Q', quantity: 1 }],
+  }), { idFactory, now: '2026-08-03T11:00:00.000Z' }).state;
+  const views = state.shipments.map((shipment) => Domain.shipmentView(state, shipment));
+  assert.deepEqual(views.map((view) => view.actualPaymentCents), [0, 1]);
+  assert.equal(views.reduce((sum, view) => sum + view.actualPaymentCents, 0), 1);
+  assert.equal(views.reduce((sum, view) => sum + view.expectedRefundCents, 0), 1);
+  assert.equal(views.reduce((sum, view) => sum + view.expectedRebateCents, 0), 1);
+  summary = Domain.stats(state);
+  assert.equal(summary.pendingShipmentPurchaseCents, 0);
+
+  let refundState = Domain.emptyState();
+  refundState = Domain.applyOperation(refundState, operation('report.create', reportPayload('r_refund_cent', '商品R', 2, 1, 1, 1)), {
+    idFactory,
+    now: '2026-08-01T11:00:00.000Z',
+  }).state;
+  const inventoryState = Domain.applyOperation(refundState, operation('refund.create', {
+    refund: { id: 'refund_inventory_cent', reportItemId: 'r_refund_cent_item', quantity: 1, refundedAt: '2026-08-02' },
+  }), { idFactory, now: '2026-08-02T10:00:00.000Z' }).state;
+  const [remainingLot] = Domain.inventoryLots(inventoryState);
+  assert.equal(remainingLot.availableActualPaymentCents, 0);
+  assert.equal(remainingLot.availableExpectedRefundCents, 0);
+  assert.equal(remainingLot.availableExpectedRebateCents, 0);
+  refundState = Domain.applyOperation(refundState, operation('shipment.create', {
+    shipment: { id: 's_refund_cent', trackingNumber: 'TRACK-REFUND-CENT', shippingCostCents: 0, shippedAt: '2026-08-02' },
+    items: [{ productName: '商品R', quantity: 1 }],
+  }), { idFactory, now: '2026-08-02T11:00:00.000Z' }).state;
+  refundState = Domain.applyOperation(refundState, operation('refund.create', {
+    refund: { id: 'refund_cent', reportItemId: 'r_refund_cent_item', quantity: 1, refundedAt: '2026-08-03' },
+  }), { idFactory, now: '2026-08-03T11:00:00.000Z' }).state;
+  const refundView = Domain.shipmentView(refundState, refundState.shipments[0]);
+  const refundSummary = Domain.stats(refundState);
+  assert.equal(refundState.refunds[0].amountCents, 1);
+  assert.equal(refundView.actualPaymentCents, 0);
+  assert.equal(refundSummary.totalPurchaseCents, 0);
+  assert.equal(refundSummary.expectedRefundCents, 0);
+  assert.equal(refundSummary.expectedRebateCents, 0);
+});
+
+test('operations cannot inject identifiers or timestamps that corrupt a snapshot', () => {
+  const base = Domain.emptyState();
+  const invalidId = operation('report.create', reportPayload('invalid_shape', '商品S', 1, 100, 120, 5));
+  invalidId.payload.report.id = 123;
+  assert.throws(
+    () => Domain.applyOperation(base, invalidId, {
+      idFactory: ids(),
+      now: '2026-08-01T11:00:00.000Z',
+    }),
+    /操作产生了无效数据/,
+  );
+  assert.deepEqual(base, Domain.emptyState());
+
+  const invalidTime = operation('report.create', reportPayload('invalid_time', '商品T', 1, 100, 120, 5));
+  invalidTime.payload.report.createdAt = { injected: true };
+  assert.throws(
+    () => Domain.applyOperation(base, invalidTime, {
+      idFactory: ids(),
+      now: '2026-08-01T11:00:00.000Z',
+    }),
+    /操作产生了无效数据/,
+  );
+  assert.deepEqual(base, Domain.emptyState());
 });

@@ -16,10 +16,10 @@
 安装以下工具：
 
 - Android SDK Command-line Tools。
-- Android SDK Platform 35、Platform-Tools 和 Build Tools 35.0.0。
+- Android SDK Platform 36、Platform-Tools 和 Build Tools 35.0.0。
 - JDK 17。
-- Gradle Wrapper（项目已包含，版本为 8.7）。
-- Android Gradle Plugin 8.6（支持 API 35）。
+- Gradle Wrapper（项目已包含，版本为 8.11.1）。
+- Android Gradle Plugin 8.9.1（支持 API 36）。
 - Node.js 18.17 或更高版本。
 
 确认 Java 和 Node 环境：
@@ -56,7 +56,7 @@ SDKMANAGER="$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
 yes | "$SDKMANAGER" --sdk_root="$SDK_ROOT" --licenses
 "$SDKMANAGER" --sdk_root="$SDK_ROOT" \
   "platform-tools" \
-  "platforms;android-35" \
+  "platforms;android-36" \
   "build-tools;35.0.0"
 ```
 
@@ -74,17 +74,17 @@ adb version
 sdkmanager --list | head -n 30
 ```
 
-## 可选：安装独立 Gradle 8.7
+## 可选：安装独立 Gradle 8.11.1
 
 Ubuntu 自带的 Gradle 可能版本太旧，直接下载到 `/mnt/nvme/gradle`：
 
 ```bash
 GRADLE_ROOT=/mnt/nvme/gradle
 mkdir -p "$GRADLE_ROOT"
-curl -fL https://services.gradle.org/distributions/gradle-8.7-bin.zip \
-  -o /tmp/gradle-8.7-bin.zip
-unzip -q /tmp/gradle-8.7-bin.zip -d "$GRADLE_ROOT"
-export PATH="$GRADLE_ROOT/gradle-8.7/bin:$PATH"
+curl -fL https://services.gradle.org/distributions/gradle-8.11.1-bin.zip \
+  -o /tmp/gradle-8.11.1-bin.zip
+unzip -q /tmp/gradle-8.11.1-bin.zip -d "$GRADLE_ROOT"
+export PATH="$GRADLE_ROOT/gradle-8.11.1/bin:$PATH"
 gradle --version
 ```
 
@@ -124,6 +124,8 @@ adb install -r android/app/build/outputs/apk/debug/app-debug.apk
 ## 生成 Release APK
 
 正式发布需要自己的签名文件。签名文件不能提交到公开仓库：
+
+项目以 Android 16（API 36）为目标平台，满足 2026 年 8 月 31 日起 Google Play 对手机和平板新应用及更新的 target API 要求。发布前还应在 Android 15/16 真机或模拟器上覆盖测试手势/三键导航、横竖屏、刘海/挖孔、软键盘和全屏编辑弹窗。
 
 ```bash
 keytool -genkeypair -v \

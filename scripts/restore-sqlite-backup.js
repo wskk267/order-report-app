@@ -3,6 +3,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const initSqlJs = require('sql.js');
 const Domain = require('../shared/domain');
+const { acquireDatabaseLock } = require('../lib/store');
 
 const SQLITE_HEADER = 'SQLite format 3\u0000';
 const COPY_BUFFER_SIZE = 64 * 1024;
@@ -58,6 +59,7 @@ function assertBackupPath(backupDir, backupPath) {
   if (isOutsideDirectory(realRelative)) {
     throw new Error('只允许恢复 runtime/backups/ 下的备份');
   }
+  return { backupDirRealPath, metadata: stat };
 }
 
 function openUniqueFile(prefix) {
@@ -84,6 +86,35 @@ function unlinkQuietly(filePath) {
   try { fs.unlinkSync(filePath); } catch {}
 }
 
+function sameFile(first, second) {
+  return first.dev === second.dev && first.ino === second.ino;
+}
+
+function assertOpenedBackupSource(sourceDescriptor, sourcePath, expectedSource) {
+  const opened = fs.fstatSync(sourceDescriptor);
+  let current;
+  try {
+    current = fs.lstatSync(sourcePath);
+  } catch {
+    throw new Error('备份文件在检查期间发生了变化');
+  }
+  if (!opened.isFile() || current.isSymbolicLink() || !current.isFile()
+    || !sameFile(opened, current) || !sameFile(opened, expectedSource.metadata)) {
+    throw new Error('备份文件在检查期间发生了变化');
+  }
+
+  const realPath = fs.realpathSync(sourcePath);
+  if (isOutsideDirectory(path.relative(expectedSource.backupDirRealPath, realPath))) {
+    throw new Error('只允许恢复 runtime/backups/ 下的备份');
+  }
+  if (process.platform === 'linux') {
+    const descriptorRealPath = fs.realpathSync(`/proc/self/fd/${sourceDescriptor}`);
+    if (isOutsideDirectory(path.relative(expectedSource.backupDirRealPath, descriptorRealPath))) {
+      throw new Error('只允许恢复 runtime/backups/ 下的备份');
+    }
+  }
+}
+
 function copyToUniqueFile(sourcePath, destinationPrefix, options = {}) {
   let sourceDescriptor = null;
   let destinationDescriptor = null;
@@ -94,6 +125,9 @@ function copyToUniqueFile(sourcePath, destinationPrefix, options = {}) {
       : 0;
     sourceDescriptor = fs.openSync(sourcePath, fs.constants.O_RDONLY | noFollow);
     if (!fs.fstatSync(sourceDescriptor).isFile()) throw new Error('源文件不是普通文件');
+    if (options.expectedSource) {
+      assertOpenedBackupSource(sourceDescriptor, sourcePath, options.expectedSource);
+    }
 
     const created = openUniqueFile(destinationPrefix);
     destinationDescriptor = created.descriptor;
@@ -136,12 +170,69 @@ function fsyncDirectory(directoryPath) {
   }
 }
 
+function releaseDatabaseLock(lock) {
+  let result = lock.release();
+  if ((!result.released || !result.durable) && !result.ownershipLost) {
+    result = lock.release();
+  }
+  return result;
+}
+
 function rowsFromResult(result) {
   if (!result || result.length === 0) return [];
   const [{ columns, values }] = result;
   return values.map((row) => Object.fromEntries(
     columns.map((column, index) => [column, row[index]]),
   ));
+}
+
+const OPTIONAL_TABLE_COLUMNS = {
+  sync_operations: ['op_id', 'client_id', 'type', 'payload_json', 'ok', 'result_json', 'error', 'created_at', 'applied_at'],
+  audit_log: ['id', 'op_id', 'type', 'result', 'details_json', 'created_at'],
+};
+
+const TABLE_PRIMARY_KEYS = {
+  app_state: ['id'],
+  sync_operations: ['op_id'],
+  audit_log: ['id'],
+};
+
+function assertOptionalTableColumns(database, tableName, requiredColumns, required = false) {
+  if (!/^[a-z_]+$/.test(tableName)) throw new Error('数据库表名无效');
+  const objects = rowsFromResult(database.exec(
+    `SELECT type FROM sqlite_schema WHERE name = '${tableName}'`,
+  ));
+  if (objects.length && (objects.length !== 1 || objects[0].type !== 'table')) {
+    throw new Error(`${tableName} 必须是数据表`);
+  }
+  const columns = rowsFromResult(database.exec(`PRAGMA table_info(${tableName})`));
+  if (!columns.length) {
+    if (required) throw new Error(`备份缺少必需的 ${tableName} 表`);
+    return;
+  }
+  const names = new Set(columns.map((column) => column.name));
+  const missing = requiredColumns.filter((column) => !names.has(column));
+  if (missing.length) throw new Error(`${tableName} 表缺少字段：${missing.join(', ')}`);
+  const primaryKey = columns
+    .filter((column) => Number(column.pk) > 0)
+    .sort((left, right) => Number(left.pk) - Number(right.pk))
+    .map((column) => column.name);
+  if (JSON.stringify(primaryKey) !== JSON.stringify(TABLE_PRIMARY_KEYS[tableName])) {
+    throw new Error(`${tableName} 表主键无效`);
+  }
+}
+
+function isRestorableStateSnapshot(value) {
+  if (Domain.isStateSnapshot(value)) return true;
+  const emptyState = Domain.emptyState();
+  const requiredCollections = Object.keys(emptyState).filter((key) => Array.isArray(emptyState[key]));
+  if (!value || typeof value !== 'object' || value.schemaVersion !== Domain.SCHEMA_VERSION
+    || !requiredCollections.every((key) => Array.isArray(value[key]))) return false;
+  try {
+    return Domain.isStateSnapshot(Domain.normalizeState(value));
+  } catch {
+    return false;
+  }
 }
 
 async function validateDatabase(databasePath) {
@@ -174,10 +265,19 @@ async function validateDatabase(databasePath) {
     `));
     if (tableRows.length !== 1) throw new Error('备份缺少必需的 app_state 表');
 
+    const stateColumns = rowsFromResult(database.exec('PRAGMA table_info(app_state)'));
+    const statePrimaryKey = stateColumns
+      .filter((column) => Number(column.pk) > 0)
+      .sort((left, right) => Number(left.pk) - Number(right.pk))
+      .map((column) => column.name);
+    if (JSON.stringify(statePrimaryKey) !== JSON.stringify(TABLE_PRIMARY_KEYS.app_state)) {
+      throw new Error('app_state 表主键无效');
+    }
+    const hasServerId = stateColumns.some((column) => column.name === 'server_id');
     let stateRows;
     try {
       stateRows = rowsFromResult(database.exec(`
-        SELECT id, version, updated_at, state_json FROM app_state
+        SELECT id, version, updated_at, state_json${hasServerId ? ', server_id' : ''} FROM app_state
       `));
     } catch (error) {
       throw new Error(`app_state 表结构无效：${error.message}`);
@@ -194,14 +294,20 @@ async function validateDatabase(databasePath) {
     } catch {
       throw new Error('app_state.state_json 不是有效 JSON');
     }
-    if (!Domain.isStateSnapshot(state)) throw new Error('app_state.state_json 不是兼容的报单管家数据');
+    if (!isRestorableStateSnapshot(state)) throw new Error('app_state.state_json 不是兼容的报单管家数据');
     if (typeof stateRows[0].version !== 'number'
-      || !Number.isInteger(stateRows[0].version)
+      || !Number.isSafeInteger(stateRows[0].version)
       || stateRows[0].version < 0) {
       throw new Error('app_state.version 无效');
     }
     if (typeof stateRows[0].updated_at !== 'string' || !stateRows[0].updated_at) {
       throw new Error('app_state.updated_at 无效');
+    }
+    if (hasServerId && (typeof stateRows[0].server_id !== 'string' || !stateRows[0].server_id.trim())) {
+      throw new Error('app_state.server_id 无效');
+    }
+    for (const [tableName, columns] of Object.entries(OPTIONAL_TABLE_COLUMNS)) {
+      assertOptionalTableColumns(database, tableName, columns, hasServerId);
     }
   } catch (error) {
     throw new Error(`备份校验失败：${error.message}`);
@@ -217,15 +323,18 @@ async function restoreBackup({ databasePath: configuredDatabasePath, inputPath }
   const databaseDir = path.dirname(databasePath);
   const backupDir = path.resolve(databaseDir, 'backups');
   const backupPath = path.resolve(inputPath);
-  assertBackupPath(backupDir, backupPath);
+  const lock = acquireDatabaseLock(databasePath, 'restore');
 
   let temporaryPath = null;
   let beforeRestorePath = null;
+  let restoreError = null;
+  let databasePublished = false;
   try {
+    const expectedSource = assertBackupPath(backupDir, backupPath);
     temporaryPath = copyToUniqueFile(
       backupPath,
       `${databasePath}.restore`,
-      { noFollow: true },
+      { noFollow: true, expectedSource },
     );
     await validateDatabase(temporaryPath);
 
@@ -241,11 +350,35 @@ async function restoreBackup({ databasePath: configuredDatabasePath, inputPath }
 
     fs.renameSync(temporaryPath, databasePath);
     temporaryPath = null;
-    fsyncDirectory(databaseDir);
+    databasePublished = true;
+    try {
+      fsyncDirectory(databaseDir);
+    } catch (error) {
+      const wrapped = new Error(`数据库已恢复，但目录同步失败，恢复结果的掉电耐久性未知：${error.message}`, { cause: error });
+      wrapped.code = 'RESTORE_PUBLISHED_FSYNC_FAILED';
+      wrapped.published = true;
+      throw wrapped;
+    }
 
     return { backupPath, beforeRestorePath };
+  } catch (error) {
+    restoreError = error;
+    throw error;
   } finally {
     unlinkQuietly(temporaryPath);
+    const releaseResult = releaseDatabaseLock(lock);
+    if (releaseResult.ownershipLost || !releaseResult.released || !releaseResult.durable) {
+      const detail = releaseResult.ownershipLost
+        ? '锁所有权在恢复期间已丢失'
+        : releaseResult.error?.message || '未知错误';
+      const releaseError = new Error(`${databasePublished ? '数据库已恢复，但' : ''}数据库锁释放失败：${detail}`, {
+        cause: releaseResult.error,
+      });
+      releaseError.code = 'DATABASE_LOCK_RELEASE_FAILED';
+      releaseError.published = databasePublished || Boolean(restoreError?.published);
+      if (restoreError) restoreError.lockReleaseError = releaseError;
+      else throw releaseError;
+    }
   }
 }
 
@@ -261,6 +394,9 @@ async function main() {
   }
 }
 
-if (require.main === module) main().catch((error) => fail(error.message));
+if (require.main === module) main().catch((error) => {
+  fail(error.message);
+  if (error.lockReleaseError) console.error(`另有错误：${error.lockReleaseError.message}`);
+});
 
 module.exports = { restoreBackup };
